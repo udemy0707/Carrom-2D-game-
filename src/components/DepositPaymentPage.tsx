@@ -156,7 +156,7 @@ export const DepositPaymentPage: React.FC<DepositPaymentPageProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
 
@@ -178,7 +178,7 @@ export const DepositPaymentPage: React.FC<DepositPaymentPageProps> = ({
     }
 
     try {
-      submitDepositRequest({
+      await submitDepositRequest({
         playerName: playerName.trim() || 'Player',
         amount,
         utr: trimmed,

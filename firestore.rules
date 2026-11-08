@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all unhandled operations
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // Schema validation helpers
+    function isValidUser(data) {
+      return data.keys().hasAll(['userId', 'depositCoins', 'bonusCoins', 'withdrawableCoins']) &&
+        data.userId is string &&
+        data.depositCoins is number && data.depositCoins >= 0 &&
+        data.bonusCoins is number && data.bonusCoins >= 0 &&
+        data.withdrawableCoins is number && data.withdrawableCoins >= 0;
+    }
+
+    function isValidDepositRequest(data) {
+      return data.keys().hasAll(['id', 'userId', 'amount', 'utrNumber', 'status', 'createdAt']) &&
+        data.id is string &&
+        data.userId is string &&
+        data.amount is number && data.amount > 0 &&
+        data.utrNumber is string &&
+        data.status in ['pending', 'approved', 'rejected'];
+    }
+
+    function isValidWithdrawalRequest(data) {
+      return data.keys().hasAll(['id', 'userId', 'amount', 'upiId', 'status', 'createdAt']) &&
+        data.id is string &&
+        data.userId is string &&
+        data.amount is number && data.amount > 0 &&
+        data.upiId is string &&
+        data.status in ['pending', 'approved', 'rejected'];
+    }
+
+    function isValidDepositConfig(data) {
+      return data.keys().hasAll(['upiId', 'payeeName']) &&
+        data.upiId is string &&
+        data.payeeName is string;
+    }
+
+    function isValidAdminSecurity(data) {
+      return data.keys().hasAll(['username', 'passwordHash', 'urlSlug']) &&
+        data.username is string &&
+        data.passwordHash is string &&
+        data.urlSlug is string;
+    }
+
+    function isValidGameRoom(data) {
+      return data.roomId is string &&
+        data.status in ['waiting', 'active', 'finished'];
+    }
+
+    // Rules for Users collection
+    match /users/{userId} {
+      allow get, list: if true;
+      allow create, update: if isValidUser(incoming());
+      allow delete: if false;
+    }
+
+    // Rules for Deposit Requests collection
+    match /deposit_requests/{requestId} {
+      allow get, list: if true;
+      allow create, update: if isValidDepositRequest(incoming());
+      allow delete: if false;
+    }
+
+    // Rules for Withdrawal Requests collection
+    match /withdrawal_requests/{requestId} {
+      allow get, list: if true;
+      allow create, update: if isValidWithdrawalRequest(incoming());
+      allow delete: if false;
+    }
+
+    // Rules for Deposit Configuration
+    match /config/deposit {
+      allow read: if true;
+      allow create, update: if isValidDepositConfig(incoming());
+      allow delete: if false;
+    }
+
+    // Rules for Admin Security Configuration
+    match /config/security {
+      allow read: if true;
+      allow create, update: if isValidAdminSecurity(incoming());
+      allow delete: if false;
+    }
+
+    // Rules for Real-Time Game Rooms
+    match /game_rooms/{roomId} {
+      allow get, list: if true;
+      allow create, update: if isValidGameRoom(incoming());
+      allow delete: if true;
+    }
+  }
+}

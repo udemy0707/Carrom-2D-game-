@@ -18,7 +18,6 @@ import {
   Lock,
   Unlock,
   AlertTriangle,
-  History,
   MessageCircle,
   Menu as MenuIcon,
   X,
@@ -35,10 +34,7 @@ import {
   Award,
   LogOut,
   Shield,
-  ArrowUpRight,
-  ArrowDownLeft,
-  QrCode,
-  Eye
+  QrCode
 } from 'lucide-react';
 
 import { AdminPanel } from './components/AdminPanel';
@@ -53,10 +49,13 @@ import {
   DepositRequest,
   getPlayerWallet,
   savePlayerWallet,
-  getPlayerDepositHistory,
-  getPlayerWithdrawalHistory,
   PlayerWalletData,
-  PlayerTransaction
+  PlayerTransaction,
+  createMultiplayerRoom,
+  joinMultiplayerRoom,
+  subscribeToRoom,
+  updateRoomGameState,
+  ServerGameRoom
 } from './services/adminSync';
 
 /* ==========================================================================
@@ -65,6 +64,8 @@ import {
 class CarromAudioEngine {
   private ctx: AudioContext | null = null;
   public enabled: boolean = true;
+  private cachedNoiseBuffer: AudioBuffer | null = null;
+  private lastFirecrackerTime = 0;
 
   private initCtx() {
     if (!this.ctx && typeof window !== 'undefined') {
@@ -265,23 +266,70 @@ class CarromAudioEngine {
     this.initCtx();
     if (!this.ctx) return;
 
-    const t = this.ctx.currentTime;
-    // Series of 4 rapid crisp crackle-pops & whistle
-    for (let i = 0; i < 4; i++) {
-      const delay = t + i * 0.12 + Math.random() * 0.05;
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      osc.type = 'square';
-      osc.frequency.setValueAtTime(800 + Math.random() * 600, delay);
-      osc.frequency.exponentialRampToValueAtTime(80, delay + 0.05);
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
 
-      gain.gain.setValueAtTime(0.35, delay);
-      gain.gain.exponentialRampToValueAtTime(0.001, delay + 0.055);
+    // Rate-limit firecracker sound bursts to prevent web audio overload/lag
+    if (now - this.lastFirecrackerTime < 0.38) return;
+    this.lastFirecrackerTime = now;
 
-      osc.connect(gain);
-      gain.connect(this.ctx.destination);
-      osc.start(delay);
-      osc.stop(delay + 0.055);
+    // Pre-allocated cached noise buffer
+    if (!this.cachedNoiseBuffer) {
+      const bufferSize = Math.floor(ctx.sampleRate * 0.12);
+      this.cachedNoiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = this.cachedNoiseBuffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.035));
+      }
+    }
+
+    // Low-frequency concussive chest thump
+    const subOsc = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    subOsc.type = 'sine';
+    subOsc.frequency.setValueAtTime(135, now);
+    subOsc.frequency.exponentialRampToValueAtTime(32, now + 0.14);
+    subGain.gain.setValueAtTime(0.45, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    subOsc.connect(subGain);
+    subGain.connect(ctx.destination);
+    subOsc.start(now);
+    subOsc.stop(now + 0.15);
+
+    // Detonation noise blast
+    const noiseSource = ctx.createBufferSource();
+    noiseSource.buffer = this.cachedNoiseBuffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(1200, now);
+    filter.Q.value = 1.4;
+
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.6, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+
+    noiseSource.connect(filter);
+    filter.connect(noiseGain);
+    noiseGain.connect(ctx.destination);
+
+    noiseSource.start(now);
+    noiseSource.stop(now + 0.12);
+
+    // Trailing micro-pops
+    for (let c = 0; c < 3; c++) {
+      const popTime = now + 0.04 + Math.random() * 0.12;
+      const popOsc = ctx.createOscillator();
+      const popGain = ctx.createGain();
+      popOsc.type = 'triangle';
+      popOsc.frequency.setValueAtTime(1600 + Math.random() * 1000, popTime);
+      popGain.gain.setValueAtTime(0.15, popTime);
+      popGain.gain.exponentialRampToValueAtTime(0.001, popTime + 0.02);
+
+      popOsc.connect(popGain);
+      popGain.connect(ctx.destination);
+      popOsc.start(popTime);
+      popOsc.stop(popTime + 0.02);
     }
   }
 
@@ -539,78 +587,144 @@ const FirecrackerCelebration: React.FC = () => {
       radius: number;
     }
 
+    interface Shockwave {
+      x: number;
+      y: number;
+      radius: number;
+      maxRadius: number;
+      color: string;
+      alpha: number;
+    }
+
     interface Rocket {
       x: number;
       y: number;
+      vx: number;
       vy: number;
       targetY: number;
       color: string;
     }
 
     const sparks: Spark[] = [];
+    const shockwaves: Shockwave[] = [];
     const rockets: Rocket[] = [];
-    const colors = ['#F59E0B', '#10B981', '#06B6D4', '#EC4899', '#EF4444', '#EAB308', '#8B5CF6'];
+    const palette = [
+      '#FFD700', // Gold
+      '#FF1744', // Vivid Red
+      '#00E5FF', // Bright Cyan
+      '#00E676', // Emerald
+      '#FF9100', // Neon Amber
+      '#E040FB', // Purple Neon
+      '#FFFFFF', // Bright White Core
+      '#FFEA00'  // Solar Yellow
+    ];
 
     const launchRocket = () => {
+      if (rockets.length >= 3) return; // Cap simultaneous rockets
+      const startX = width * 0.2 + Math.random() * (width * 0.6);
+      const targetY = height * 0.12 + Math.random() * (height * 0.38);
+      const targetX = startX + (Math.random() - 0.5) * (width * 0.15);
+      const dy = targetY - height;
+      const vy = -(12 + Math.random() * 4);
+      const frames = dy / vy;
+      const vx = (targetX - startX) / Math.max(1, frames);
+
       rockets.push({
-        x: Math.random() * (width * 0.8) + width * 0.1,
+        x: startX,
         y: height,
-        vy: -(Math.random() * 4 + 10),
-        targetY: Math.random() * (height * 0.5) + height * 0.12,
-        color: colors[Math.floor(Math.random() * colors.length)],
+        vx,
+        vy,
+        targetY,
+        color: palette[Math.floor(Math.random() * palette.length)],
       });
     };
 
     const explode = (x: number, y: number, color: string) => {
-      const count = 40 + Math.floor(Math.random() * 25);
+      soundEngine.playFirecracker();
+
+      shockwaves.push({
+        x,
+        y,
+        radius: 3,
+        maxRadius: 55 + Math.random() * 25,
+        color,
+        alpha: 0.85,
+      });
+
+      // 24 lightweight sparks per explosion
+      const count = 22 + Math.floor(Math.random() * 8);
       for (let i = 0; i < count; i++) {
+        if (sparks.length > 70) sparks.shift(); // Enforce hard cap on active particles
         const ang = Math.random() * Math.PI * 2;
-        const spd = Math.random() * 5.5 + 1.8;
+        const speed = Math.random() * 5.8 + 1.8;
         sparks.push({
           x,
           y,
-          vx: Math.cos(ang) * spd,
-          vy: Math.sin(ang) * spd,
-          color,
+          vx: Math.cos(ang) * speed,
+          vy: Math.sin(ang) * speed,
+          color: Math.random() > 0.3 ? color : '#FFFFFF',
           alpha: 1,
-          decay: Math.random() * 0.022 + 0.014,
-          radius: Math.random() * 2.6 + 1.2,
+          decay: Math.random() * 0.022 + 0.016,
+          radius: Math.random() * 2.2 + 1.2,
         });
       }
     };
 
     launchRocket();
     launchRocket();
-    const interval = setInterval(launchRocket, 420);
+
+    const interval = setInterval(launchRocket, 520);
 
     const loop = () => {
       ctx.clearRect(0, 0, width, height);
 
-      // Rockets update
+      // Render shockwaves
+      for (let i = shockwaves.length - 1; i >= 0; i--) {
+        const sw = shockwaves[i];
+        sw.radius += 3.8;
+        sw.alpha -= 0.045;
+
+        if (sw.alpha <= 0 || sw.radius >= sw.maxRadius) {
+          shockwaves.splice(i, 1);
+          continue;
+        }
+
+        ctx.beginPath();
+        ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = sw.color;
+        ctx.lineWidth = 2.5 * sw.alpha;
+        ctx.globalAlpha = Math.max(0, sw.alpha);
+        ctx.stroke();
+      }
+
+      // Render ascending rockets
       for (let i = rockets.length - 1; i >= 0; i--) {
         const r = rockets[i];
+        r.x += r.vx;
         r.y += r.vy;
-        ctx.beginPath();
-        ctx.arc(r.x, r.y, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = r.color;
-        ctx.shadowColor = r.color;
-        ctx.shadowBlur = 10;
-        ctx.fill();
-        ctx.shadowBlur = 0;
 
-        if (r.y <= r.targetY) {
+        ctx.beginPath();
+        ctx.arc(r.x, r.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = r.color;
+        ctx.globalAlpha = 1;
+        ctx.fill();
+
+        if (r.y <= r.targetY || r.vy >= 0) {
           explode(r.x, r.y, r.color);
           rockets.splice(i, 1);
         }
       }
 
-      // Sparks update
+      // Render sparks as fast vector lines
       for (let i = sparks.length - 1; i >= 0; i--) {
         const s = sparks[i];
+        const oldX = s.x;
+        const oldY = s.y;
+
         s.x += s.vx;
         s.y += s.vy;
-        s.vy += 0.065;
-        s.vx *= 0.98;
+        s.vy += 0.09; // Gravity
+        s.vx *= 0.975; // Air drag
         s.alpha -= s.decay;
 
         if (s.alpha <= 0) {
@@ -618,17 +732,16 @@ const FirecrackerCelebration: React.FC = () => {
           continue;
         }
 
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, s.alpha);
         ctx.beginPath();
-        ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
-        ctx.fillStyle = s.color;
-        ctx.shadowColor = s.color;
-        ctx.shadowBlur = 6;
-        ctx.fill();
-        ctx.restore();
+        ctx.moveTo(oldX, oldY);
+        ctx.lineTo(s.x, s.y);
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = s.radius;
+        ctx.globalAlpha = Math.max(0, s.alpha);
+        ctx.stroke();
       }
 
+      ctx.globalAlpha = 1;
       animId = requestAnimationFrame(loop);
     };
 
@@ -641,7 +754,7 @@ const FirecrackerCelebration: React.FC = () => {
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="fixed inset-0 pointer-events-none z-50 w-full h-full" />;
+  return <canvas ref={canvasRef} className="fixed inset-0 pointer-events-none z-[70] w-full h-full" />;
 };
 
 /* ==========================================================================
@@ -679,7 +792,7 @@ export default function App() {
   const [turnTimeLeft, setTurnTimeLeft] = useState<number>(20);
   const [idleSeconds, setIdleSeconds] = useState<number>(0);
   const lastActivityTimeRef = useRef<number>(Date.now());
-  const [activeModal, setActiveModal] = useState<'menu' | 'deposit' | 'withdraw' | 'history' | 'rules' | 'chat' | 'confirm_leave' | null>(null);
+  const [activeModal, setActiveModal] = useState<'menu' | 'deposit' | 'withdraw' | 'rules' | 'chat' | 'confirm_leave' | null>(null);
 
   // Custom Player Name (Rule 6: No Guest)
   const [playerName, setPlayerName] = useState<string>(() => {
@@ -707,6 +820,9 @@ export default function App() {
   // Create Game Selection State (Betting Options: 50, 100, 200, 500, 1000, 2000)
   const [selectedBet, setSelectedBet] = useState<number>(500);
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
+  const [joinRoomErrorMsg, setJoinRoomErrorMsg] = useState<string | null>(null);
+  const [isCreatingRoom, setIsCreatingRoom] = useState(false);
+  const [isJoiningRoom, setIsJoiningRoom] = useState(false);
   const [copyNotification, setCopyNotification] = useState(false);
 
   // Economy state - strictly permanent player wallet, zero hardcoded balance
@@ -714,9 +830,6 @@ export default function App() {
     return getPlayerWallet(playerName);
   });
 
-  // History & Passbook Modal states
-  const [historyTab, setHistoryTab] = useState<'transactions' | 'deposits' | 'withdrawals'>('transactions');
-  const [historyScreenshotPreview, setHistoryScreenshotPreview] = useState<string | null>(null);
   const [insufficientBalanceNotice, setInsufficientBalanceNotice] = useState<{ required: number; available: number } | null>(null);
 
   const [soundMuted, setSoundMuted] = useState(false);
@@ -849,7 +962,7 @@ export default function App() {
     currentTurnRef.current = currentTurn;
   }, [currentTurn]);
 
-  // URL route detection for Admin Panel (/admin9999, /Admin9999, etc.) & real-time sync
+  // URL route detection for Admin Panel & real-time server security sync
   useEffect(() => {
     const handleCheckUrl = () => {
       if (checkIsAdminUrl()) {
@@ -1220,9 +1333,9 @@ export default function App() {
 
 
   /* ==========================================================================
-     CREATE GAME FLOW
+     CREATE REAL-TIME MULTIPLAYER GAME ROOM (FIRESTORE BACKED)
      ========================================================================== */
-  const handleCreateRoom = () => {
+  const handleCreateRoom = async () => {
     if (wallet.realBalance < selectedBet) {
       setInsufficientBalanceNotice({
         required: selectedBet,
@@ -1231,33 +1344,67 @@ export default function App() {
       return;
     }
 
-    const randomId = `CR-${Math.floor(1000 + Math.random() * 9000)}`;
-    const bet = selectedBet;
-    const totalPot = bet * 2;
-    const platformRake = Math.round(totalPot * 0.1);
-    const winnerPrize = totalPot - platformRake;
+    try {
+      setIsCreatingRoom(true);
+      const serverRoom = await createMultiplayerRoom(playerName, selectedBet);
+      const newRoom: GameRoom = {
+        gameId: serverRoom.roomId,
+        hostName: serverRoom.hostName,
+        opponentName: 'Waiting for player...',
+        betAmount: serverRoom.entryFee,
+        totalPot: serverRoom.totalPot,
+        winnerPrize: serverRoom.winnerPrize,
+        platformRake: serverRoom.platformRake,
+        status: 'waiting',
+      };
 
-    const newRoom: GameRoom = {
-      gameId: randomId,
-      hostName: playerName.trim() || 'Player',
-      opponentName: 'Challenger_Pro',
-      betAmount: bet,
-      totalPot,
-      winnerPrize,
-      platformRake,
-      status: 'waiting',
-    };
-
-    setActiveRoom(newRoom);
-    setScreen('room_waiting');
+      setActiveRoom(newRoom);
+      setScreen('room_waiting');
+    } catch (err) {
+      console.error('Failed to create server room:', err);
+    } finally {
+      setIsCreatingRoom(false);
+    }
   };
+
+  // Host Listener: Auto-transition Player 1 into the match as soon as Player 2 joins!
+  useEffect(() => {
+    if (screen !== 'room_waiting' || !activeRoom.gameId) return;
+
+    let isTransitioned = false;
+    const unsub = subscribeToRoom(activeRoom.gameId, (serverRoom) => {
+      if (!isTransitioned && serverRoom.status === 'active' && serverRoom.guestName) {
+        isTransitioned = true;
+        setOpponentName(serverRoom.guestName);
+        const fullRoom: GameRoom = {
+          gameId: serverRoom.roomId,
+          hostName: serverRoom.hostName,
+          opponentName: serverRoom.guestName,
+          betAmount: serverRoom.entryFee,
+          totalPot: serverRoom.totalPot,
+          winnerPrize: serverRoom.winnerPrize,
+          platformRake: serverRoom.platformRake,
+          status: 'playing',
+        };
+        startMatchWithBet(fullRoom);
+      }
+    });
+
+    return () => {
+      if (unsub) unsub();
+    };
+  }, [screen, activeRoom.gameId]);
 
   /* ==========================================================================
-     JOIN GAME FLOW (REQUIREMENT 9: SMOOTH JOIN ROOM & PLAY)
+     JOIN REAL-TIME MULTIPLAYER GAME ROOM (FIRESTORE BACKED)
      ========================================================================== */
-  const handleJoinRoomWithCode = () => {
+  const handleJoinRoomWithCode = async () => {
+    setJoinRoomErrorMsg(null);
     const code = joinCodeInput.trim().toUpperCase();
-    if (!code) return;
+    if (!code) {
+      setJoinRoomErrorMsg('Please enter a valid 6-digit Room Code.');
+      return;
+    }
 
     if (wallet.realBalance < selectedBet) {
       setInsufficientBalanceNotice({
@@ -1267,30 +1414,71 @@ export default function App() {
       return;
     }
 
-    const bet = selectedBet;
-    const totalPot = bet * 2;
-    const platformRake = Math.round(totalPot * 0.1);
-    const winnerPrize = totalPot - platformRake;
+    try {
+      setIsJoiningRoom(true);
+      const res = await joinMultiplayerRoom(code, playerName);
+      if (!res.success || !res.room) {
+        setJoinRoomErrorMsg(res.error || 'Failed to join room. Please check the code.');
+        return;
+      }
 
-    const hostName =
-      code === activeRoom.gameId && activeRoom.hostName
-        ? activeRoom.hostName
-        : `Host_${code.replace(/[^A-Z0-9]/g, '').slice(-4) || 'Player'}`;
+      const sRoom = res.room;
+      const joinedRoom: GameRoom = {
+        gameId: sRoom.roomId,
+        hostName: sRoom.hostName,
+        opponentName: playerName.trim() || 'Player',
+        betAmount: sRoom.entryFee,
+        totalPot: sRoom.totalPot,
+        winnerPrize: sRoom.winnerPrize,
+        platformRake: sRoom.platformRake,
+        status: 'playing',
+      };
 
-    const joinedRoom: GameRoom = {
-      gameId: code,
-      hostName,
-      opponentName: playerName.trim() || 'Player',
-      betAmount: bet,
-      totalPot,
-      winnerPrize,
-      platformRake,
-      status: 'playing',
-    };
-
-    setOpponentName(hostName);
-    startMatchWithBet(joinedRoom);
+      setOpponentName(sRoom.hostName);
+      startMatchWithBet(joinedRoom);
+    } catch (err) {
+      console.error('Failed to join server room:', err);
+      setJoinRoomErrorMsg('Error joining room. Please try again.');
+    } finally {
+      setIsJoiningRoom(false);
+    }
   };
+
+  // Real-time Opponent Shot Listener during active Multiplayer gameplay
+  useEffect(() => {
+    if (screen !== 'gameplay' || !activeRoom.gameId) return;
+
+    let lastHandledShotTime = 0;
+    const unsub = subscribeToRoom(activeRoom.gameId, (serverRoom) => {
+      if (serverRoom.gameState) {
+        try {
+          const parsed = JSON.parse(serverRoom.gameState);
+          if (parsed.shot && parsed.shot.shooter !== playerName && parsed.shot.timestamp > lastHandledShotTime) {
+            lastHandledShotTime = parsed.shot.timestamp;
+            const s = strikerRef.current;
+            if (!isTurnInProgressRef.current) {
+              s.x = parsed.shot.strikerX ?? 400;
+              s.vx = parsed.shot.vx;
+              s.vy = parsed.shot.vy;
+              isTurnInProgressRef.current = true;
+              setIsStrikerMoving(true);
+              soundEngine.playStrikerHit(parsed.shot.power || 0.8);
+            }
+          }
+          if (parsed.turn) {
+            setCurrentTurn(parsed.turn);
+            currentTurnRef.current = parsed.turn;
+          }
+        } catch (e) {
+          // Guard for parse
+        }
+      }
+    });
+
+    return () => {
+      if (unsub) unsub();
+    };
+  }, [screen, activeRoom.gameId, playerName]);
 
   /* ==========================================================================
      PHYSICS SIMULATION STEP (RULE 1: STRONGER FRAME LOGIC & RULE 2: FAIR POCKETS)
@@ -1327,11 +1515,14 @@ export default function App() {
             pocketsInTurnRef.current.push(d);
             const isQueen = d.type === 'queen';
             soundEngine.playPocketSink(isQueen);
+            if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+              try { navigator.vibrate(35); } catch {}
+            }
 
             spawnFloatingScore(
               d.x,
               d.y,
-              isQueen ? '+QUEEN' : d.type === 'white' ? '+1 WHITE' : '+1 BLACK',
+              isQueen ? '+3' : d.type === 'white' ? '+1' : '+1',
               isQueen ? '#EC4899' : d.type === 'white' ? '#FFFFFF' : '#A3E635'
             );
             spawnPocketParticles(
@@ -1531,22 +1722,19 @@ export default function App() {
         if (queenState === 'pending_player') {
           returnCoinToCenter('queen');
           setQueenState('on_board');
-          spawnFloatingScore(400, 400, 'COVER FAILED! QUEEN RETURNED', '#EC4899');
         }
       } else {
         if (newBlackTotal >= 1) {
           newBlackTotal = Math.max(0, newBlackTotal - 1);
           returnCoinToCenter('black');
-          spawnFloatingScore(400, BOT_BASELINE_Y, 'BOT FOUL! -1 COIN DEDUCTED', '#EF4444');
+          spawnFloatingScore(400, BOT_BASELINE_Y, 'BOT FOUL!', '#EF4444');
         } else {
           newBlackTotal = 0;
-          spawnFloatingScore(400, BOT_BASELINE_Y, 'BOT SINK (SCORE 0 - NO PENALTY)', '#F59E0B');
         }
 
         if (queenState === 'pending_bot') {
           returnCoinToCenter('queen');
           setQueenState('on_board');
-          spawnFloatingScore(400, 400, 'COVER FAILED! QUEEN RETURNED', '#EC4899');
         }
       }
 
@@ -1564,12 +1752,11 @@ export default function App() {
           if (whitePocketedThisTurn >= 1) {
             // Already covered in same shot!
             setQueenState('covered_player');
-            spawnFloatingScore(400, 400, '👑 QUEEN COVERED & SECURED!', '#FBBF24');
+            spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
             nextWho = 'player'; // Extra turn
           } else {
             // Queen pending: must cover on next shot
             setQueenState('pending_player');
-            spawnFloatingScore(400, 400, '👑 QUEEN PENDING! POCKET WHITE TO COVER', '#F59E0B');
             nextWho = 'player'; // Extra turn to cover
           }
         } else if (queenState === 'pending_player') {
@@ -1577,13 +1764,12 @@ export default function App() {
           if (whitePocketedThisTurn >= 1) {
             // Cover successful!
             setQueenState('covered_player');
-            spawnFloatingScore(400, 400, '👑 QUEEN COVERED & SECURED!', '#FBBF24');
+            spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
             nextWho = 'player'; // Extra turn
           } else {
             // Failed to pocket White coin! Queen returns to center!
             returnCoinToCenter('queen');
             setQueenState('on_board');
-            spawnFloatingScore(400, 400, 'COVER FAILED! QUEEN RETURNED TO CENTER', '#EC4899');
             nextWho = 'bot'; // Turn passes to opponent
           }
         } else {
@@ -1601,22 +1787,20 @@ export default function App() {
         if (queenPocketedThisTurn) {
           if (blackPocketedThisTurn >= 1) {
             setQueenState('covered_bot');
-            spawnFloatingScore(400, 400, '👑 BOT COVERED QUEEN!', '#FBBF24');
+            spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
             nextWho = 'bot';
           } else {
             setQueenState('pending_bot');
-            spawnFloatingScore(400, 400, '👑 BOT PENDING QUEEN COVER', '#F59E0B');
             nextWho = 'bot';
           }
         } else if (queenState === 'pending_bot') {
           if (blackPocketedThisTurn >= 1) {
             setQueenState('covered_bot');
-            spawnFloatingScore(400, 400, '👑 BOT SECURED QUEEN!', '#FBBF24');
+            spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
             nextWho = 'bot';
           } else {
             returnCoinToCenter('queen');
             setQueenState('on_board');
-            spawnFloatingScore(400, 400, 'COVER FAILED! QUEEN RETURNED TO CENTER', '#EC4899');
             nextWho = 'player';
           }
         } else {
@@ -1709,13 +1893,13 @@ export default function App() {
   }, [playerWhitePocketed, botBlackPocketed, queenState, activeRoom, playerName, opponentName, returnCoinToCenter, spawnFloatingScore]);
 
   /* ==========================================================================
-     BOT LOGIC
+     BOT LOGIC (FAIR PLAY: ZERO AIM ASSIST / NO GHOST-BALL GEOMETRIC SOLVER)
      ========================================================================== */
   const executeBotTurn = useCallback(() => {
     const active = coinsRef.current.filter((c) => !c.isPocketed && !c.isSinking);
     if (active.length === 0) return;
 
-    // Filter candidate target coins (prioritize covering queen if pending)
+    // Pick target coin (prioritize covering queen if pending)
     let candidates: Coin[] = [];
     if (queenState === 'pending_bot') {
       candidates = active.filter((c) => c.type === 'black');
@@ -1727,91 +1911,42 @@ export default function App() {
       candidates = active;
     }
 
-    interface CandidateShot {
-      coin: Coin;
-      pocket: { x: number; y: number };
-      strikerX: number;
-      shotAngle: number;
-      power: number;
-      score: number;
-    }
+    // Natural target selection (closest or random eligible coin)
+    const targetCoin = candidates[Math.floor(Math.random() * candidates.length)];
 
-    const evaluatedShots: CandidateShot[] = [];
+    // Natural human-like baseline placement (not reverse-engineered by computer)
+    const baselineVariation = (Math.random() - 0.5) * 90;
+    const botStrikerX = Math.max(
+      BASELINE_MIN_X,
+      Math.min(BASELINE_MAX_X, targetCoin.x + baselineVariation)
+    );
 
-    // Evaluate all combinations of candidate coins and 4 corner pockets
-    for (const coin of candidates) {
-      for (const pocket of POCKETS) {
-        const coinToPocketDist = Math.hypot(pocket.x - coin.x, pocket.y - coin.y);
-        const coinToPocketAngle = Math.atan2(pocket.y - coin.y, pocket.x - coin.x);
-
-        // Required ghost impact point behind coin
-        const impactDist = STRIKER_RADIUS + COIN_RADIUS;
-        const ghostX = coin.x - Math.cos(coinToPocketAngle) * impactDist;
-        const ghostY = coin.y - Math.sin(coinToPocketAngle) * impactDist;
-
-        // Ideal position along the top baseline
-        const idealStrikerX = Math.max(BASELINE_MIN_X, Math.min(BASELINE_MAX_X, ghostX));
-        const strikerToImpactDist = Math.hypot(ghostX - idealStrikerX, ghostY - BOT_BASELINE_Y);
-        const shotAngle = Math.atan2(ghostY - BOT_BASELINE_Y, ghostX - idealStrikerX);
-
-        // Calculate alignment difference between shot path and coin-to-pocket path
-        let angleDiff = Math.abs(shotAngle - coinToPocketAngle);
-        while (angleDiff > Math.PI) angleDiff = Math.abs(angleDiff - Math.PI * 2);
-
-        // Medium difficulty shot scoring:
-        let score = 1000 - coinToPocketDist * 1.3 - strikerToImpactDist * 0.8;
-        score -= angleDiff * 380; // Penalty for steep cuts
-
-        if (coin.type === 'queen') score += 180;
-        if (angleDiff < 0.45) score += 160;
-
-        // Disfavor hitting backwards towards opponent baseline
-        if (Math.sin(shotAngle) < 0.15) score -= 400;
-
-        // Realistic shot power calculation tuned for medium difficulty
-        const totalDistance = strikerToImpactDist + coinToPocketDist;
-        const calculatedPower = Math.min(23.0, Math.max(9.5, Math.sqrt(totalDistance * 1.35)));
-
-        evaluatedShots.push({
-          coin,
-          pocket,
-          strikerX: idealStrikerX,
-          shotAngle,
-          power: calculatedPower,
-          score,
-        });
-      }
-    }
-
-    // Sort by best shot score
-    evaluatedShots.sort((a, b) => b.score - a.score);
-    const best = evaluatedShots[0] || {
-      coin: candidates[0],
-      pocket: POCKETS[2],
-      strikerX: 400,
-      shotAngle: Math.PI / 2,
-      power: 14,
-      score: 0,
-    };
-
-    // Position striker at computed optimal baseline point
-    strikerRef.current.x = best.strikerX;
+    // Place striker on the bot's baseline
+    strikerRef.current.x = botStrikerX;
     strikerRef.current.y = BOT_BASELINE_Y;
-    setStrikerX(best.strikerX);
+    setStrikerX(botStrikerX);
 
-    // Medium Difficulty AI: Apply small human-like aim variance (+/- 0.026 radians)
-    const mediumVariance = (Math.random() - 0.5) * 0.026;
-    const finalShotAngle = best.shotAngle + mediumVariance;
+    // Aim directly towards the coin — NO ghost pocket angle calculation or aim assist
+    const rawDx = targetCoin.x - botStrikerX;
+    const rawDy = targetCoin.y - BOT_BASELINE_Y;
+    const directAngle = Math.atan2(rawDy, rawDx);
+
+    // Natural human spread/imprecision (variance of ±0.14 rad, like real human hand aim)
+    const humanVariance = (Math.random() - 0.5) * 0.28;
+    const finalShotAngle = directAngle + humanVariance;
+
+    // Natural striking force (12 to 19, realistic strike speed)
+    const naturalPower = 12.5 + Math.random() * 6.5;
 
     setTimeout(() => {
       botAimLineRef.current = null;
       isTurnInProgressRef.current = true;
       setIsStrikerMoving(true);
 
-      strikerRef.current.vx = Math.cos(finalShotAngle) * best.power;
-      strikerRef.current.vy = Math.sin(finalShotAngle) * best.power;
+      strikerRef.current.vx = Math.cos(finalShotAngle) * naturalPower;
+      strikerRef.current.vy = Math.sin(finalShotAngle) * naturalPower;
 
-      soundEngine.playStrikerHit(best.power / MAX_STRIKE_VELOCITY);
+      soundEngine.playStrikerHit(naturalPower / MAX_STRIKE_VELOCITY);
     }, 650);
   }, [queenState]);
 
@@ -1889,11 +2024,7 @@ export default function App() {
   useEffect(() => {
     if (!gameOverResult) return;
     if (gameOverResult.winner === 'player') {
-      soundEngine.playFirecracker();
-      const firecrackerInterval = setInterval(() => {
-        soundEngine.playFirecracker();
-      }, 650);
-      return () => clearInterval(firecrackerInterval);
+      soundEngine.playVictory();
     } else {
       soundEngine.playDefeat();
     }
@@ -2020,6 +2151,20 @@ export default function App() {
         strikerRef.current.vy = Math.sin(shotAngle) * impulseSpeed;
 
         soundEngine.playStrikerHit(power);
+
+        // Broadcast shot to Firestore for real-time 2-player multiplayer
+        if (activeRoom.gameId && screen === 'gameplay') {
+          updateRoomGameState(activeRoom.gameId, {
+            shot: {
+              vx: strikerRef.current.vx,
+              vy: strikerRef.current.vy,
+              power,
+              strikerX: s.x,
+              shooter: playerName,
+              timestamp: Date.now(),
+            },
+          });
+        }
       }
 
       setDragForce({
@@ -2866,20 +3011,6 @@ export default function App() {
         ctx.fillStyle = '#FFE600';
         ctx.fill();
 
-        // Shorter White Dotted Line (Requirement 1: exactly shortened for clean aim)
-        const trajectoryLen = 45 + dragForce.power * 55;
-        ctx.beginPath();
-        ctx.setLineDash([4, 5]);
-        ctx.moveTo(arrowEndX, arrowEndY);
-        ctx.lineTo(
-          arrowEndX + dragForce.dirX * trajectoryLen,
-          arrowEndY + dragForce.dirY * trajectoryLen
-        );
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
-        ctx.lineWidth = 2.2;
-        ctx.stroke();
-        ctx.setLineDash([]);
-
         ctx.restore();
       }
 
@@ -2950,7 +3081,7 @@ export default function App() {
     setActiveModal(null);
   };
 
-  const handleCustomWithdrawalSubmit = (e: React.FormEvent) => {
+  const handleCustomWithdrawalSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setWithdrawErrorMsg(null);
     setWithdrawSuccessMsg(null);
@@ -2978,7 +3109,7 @@ export default function App() {
       return;
     }
 
-    const res = submitWithdrawalRequest({
+    const res = await submitWithdrawalRequest({
       playerName: playerName.trim() || 'Player',
       amount: amt,
       playerUpi: upi,
@@ -3066,22 +3197,6 @@ export default function App() {
           <span className="text-[10px] text-emerald-300 font-semibold tracking-wider uppercase mt-0.5">
             {activeRoom.gameId} · Bet ₹{activeRoom.betAmount}
           </span>
-
-          {/* Queen Status on Scoreboard (Requirement 3 & 6: Authentic 3D Queen Coin) */}
-          <div className="flex items-center gap-1.5 bg-neutral-950/80 border border-neutral-800 rounded-full px-2.5 py-0.5 mt-1 shadow-inner">
-            <ScoreboardCarromCoin type="queen" size={16} />
-            <span className="text-[10px] font-bold tracking-tight text-amber-300">
-              {queenState === 'covered_player'
-                ? 'Secured: You'
-                : queenState === 'covered_bot'
-                ? `Secured: ${opponentName}`
-                : queenState === 'pending_player'
-                ? 'Cover Pending (You)'
-                : queenState === 'pending_bot'
-                ? 'Cover Pending (Opponent)'
-                : 'Queen In Play'}
-            </span>
-          </div>
         </div>
 
         {/* Right: Player Avatar Card with Player Name & Queen Indicator */}
@@ -3127,29 +3242,6 @@ export default function App() {
           )}
         </div>
       </div>
-
-      {/* --- QUEEN STATUS NOTIFIER BANNER (RULE 8 - NO EMOJIS) --- */}
-      {queenState === 'pending_player' && (
-        <div className="relative z-10 w-full max-w-[420px] mx-auto px-4 -mt-1 mb-1">
-          <div className="bg-red-500/20 border border-red-500/60 rounded-xl px-3 py-1.5 text-center shadow-sm flex items-center justify-center gap-2 animate-pulse">
-            <ScoreboardCarromCoin type="queen" size={16} />
-            <span className="text-xs font-bold text-red-200">
-              Queen Pocketed! Pocket a White coin on this shot to cover and secure the Queen!
-            </span>
-          </div>
-        </div>
-      )}
-
-      {queenState === 'pending_bot' && (
-        <div className="relative z-10 w-full max-w-[420px] mx-auto px-4 -mt-1 mb-1">
-          <div className="bg-red-500/20 border border-red-500/60 rounded-xl px-3 py-1.5 text-center shadow-sm flex items-center justify-center gap-2">
-            <ScoreboardCarromCoin type="queen" size={16} />
-            <span className="text-xs font-bold text-red-200">
-              Opponent pocketed Queen! Must cover with a Black coin.
-            </span>
-          </div>
-        </div>
-      )}
 
       {/* --- CENTER: THE CARROM BOARD CANVAS (RULE 4 REAL BOARD FRAME) --- */}
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-3 py-1">
@@ -3225,24 +3317,6 @@ export default function App() {
           aria-label="Open Chat Emojis"
         >
           <MessageCircle className="w-6 h-6 text-neutral-900 fill-neutral-900" />
-        </button>
-
-        {/* Center: Live Real Balance & Passbook Quick Access */}
-        <button
-          onClick={() => setActiveModal('history')}
-          className="px-3.5 py-2 rounded-2xl bg-black/60 hover:bg-black/80 border border-white/10 hover:border-amber-400/50 backdrop-blur-md flex items-center gap-2 shadow-lg active:scale-95 transition-all"
-          title="Open Account Passbook & History"
-        >
-          <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-xs">
-            ₹
-          </div>
-          <div className="text-left leading-none">
-            <span className="text-[9px] text-neutral-400 font-semibold block">Wallet</span>
-            <span className="font-display font-black text-sm text-emerald-400 tabular-nums">
-              ₹{wallet.realBalance}
-            </span>
-          </div>
-          <History className="w-3.5 h-3.5 text-neutral-400" />
         </button>
 
         {/* Bottom Right: Menu Button */}
@@ -3444,14 +3518,11 @@ export default function App() {
       {screen === 'join_game' && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-6 space-y-5 shadow-2xl relative">
-            <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+            <div className="border-b border-neutral-800 pb-3">
               <div>
                 <h3 className="font-display font-extrabold text-xl text-white">Join Game Room</h3>
                 <p className="text-xs text-neutral-400">Enter the unique Game ID provided by your opponent</p>
               </div>
-              <button onClick={() => setScreen('gameplay')} className="text-neutral-400 hover:text-white">
-                <X className="w-6 h-6" />
-              </button>
             </div>
 
             <div className="space-y-3">
@@ -3469,11 +3540,19 @@ export default function App() {
                 <label className="text-xs font-semibold text-neutral-300 block mb-1">Enter Unique Game ID</label>
                 <input
                   type="text"
-                  placeholder="e.g. CR-5892"
+                  placeholder="Enter 6-digit Room Code"
                   value={joinCodeInput}
-                  onChange={(e) => setJoinCodeInput(e.target.value)}
+                  onChange={(e) => {
+                    setJoinCodeInput(e.target.value);
+                    setJoinRoomErrorMsg(null);
+                  }}
                   className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-sm text-amber-400 font-mono font-bold tracking-widest uppercase focus:border-amber-400 focus:outline-none"
                 />
+                {joinRoomErrorMsg && (
+                  <p className="text-[11px] text-rose-400 font-semibold mt-1 animate-shake">
+                    ⚠️ {joinRoomErrorMsg}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -3499,13 +3578,16 @@ export default function App() {
 
       {/* --- MENU MODAL --- */}
       {activeModal === 'menu' && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-xs w-full bg-neutral-900 border border-neutral-800 rounded-2xl p-5 space-y-4 shadow-2xl relative">
-            <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
+        <div
+          onClick={() => setActiveModal(null)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 cursor-pointer"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-xs w-full bg-neutral-900 border border-neutral-800 rounded-2xl p-5 space-y-4 shadow-2xl relative cursor-default"
+          >
+            <div className="border-b border-neutral-800 pb-2">
               <h3 className="font-display font-bold text-lg text-white">Game Menu</h3>
-              <button onClick={() => setActiveModal(null)} className="text-neutral-400 hover:text-white">
-                <X className="w-5 h-5" />
-              </button>
             </div>
 
             <div className="space-y-2">
@@ -3548,17 +3630,6 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => setActiveModal('history')}
-                className="w-full py-2.5 px-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-xs font-semibold text-neutral-200 flex items-center justify-between transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <History className="w-4 h-4 text-amber-400" />
-                  Passbook &amp; History
-                </span>
-                <span className="text-neutral-400 text-[10px]">Ledger &amp; UTR</span>
-              </button>
-
-              <button
                 onClick={() => setActiveModal('withdraw')}
                 className="w-full py-2.5 px-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-xs font-semibold text-neutral-200 flex items-center justify-between transition-colors"
               >
@@ -3588,6 +3659,13 @@ export default function App() {
                   <RotateCcw className="w-4 h-4 text-amber-400" />
                   Restart Match
                 </span>
+              </button>
+
+              <button
+                onClick={() => setActiveModal(null)}
+                className="w-full py-2 px-3 mt-1 bg-neutral-800/50 hover:bg-neutral-800 rounded-xl text-xs font-bold text-neutral-400 hover:text-white transition-colors"
+              >
+                Close Menu
               </button>
             </div>
           </div>
@@ -3932,7 +4010,9 @@ export default function App() {
             <DefeatAnimation />
           )}
 
-          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-all ${
+            gameOverResult.winner === 'player' ? 'bg-black/55 backdrop-blur-sm' : 'bg-black/85 backdrop-blur-md'
+          }`}>
             <div
               className={`max-w-sm w-full bg-neutral-900 border rounded-3xl p-6 text-center space-y-4 shadow-2xl relative ${
                 gameOverResult.winner === 'player'
@@ -4144,324 +4224,6 @@ export default function App() {
                 className="w-full py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white font-bold text-xs transition-colors"
               >
                 Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* --- PLAYER ACCOUNT PASSBOOK & HISTORY MODAL (RULE: PERMANENT ZERO-HARDCODING) --- */}
-      {activeModal === 'history' && (() => {
-        const playerDeposits = getPlayerDepositHistory(playerName);
-        const playerWithdrawals = getPlayerWithdrawalHistory(playerName);
-
-        return (
-          <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
-            <div className="max-w-xl w-full max-h-[90vh] bg-neutral-900 border border-neutral-800 rounded-3xl p-5 flex flex-col shadow-2xl relative overflow-hidden">
-              {/* Header */}
-              <div className="flex items-center justify-between pb-3 border-b border-neutral-800 shrink-0">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
-                    <History className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-display font-black text-lg text-white">Player Passbook & Ledger</h3>
-                    <p className="text-[11px] text-neutral-400">
-                      Permanent records for <span className="text-amber-400 font-bold">{playerName}</span> • Never resets
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => setActiveModal(null)}
-                  className="w-8 h-8 rounded-full bg-neutral-800 hover:bg-neutral-700 flex items-center justify-center text-neutral-400 hover:text-white transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Player Permanent Stats Card */}
-              <div className="mt-3 p-3.5 bg-neutral-950/80 border border-neutral-800/80 rounded-2xl shrink-0">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
-                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Real Balance</span>
-                    <span className="text-base font-black text-emerald-400">₹{wallet.realBalance.toLocaleString()}</span>
-                  </div>
-                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
-                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Matches Played</span>
-                    <span className="text-base font-black text-white">{wallet.matchesPlayed}</span>
-                  </div>
-                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
-                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Matches Won</span>
-                    <span className="text-base font-black text-amber-400">{wallet.matchesWon}</span>
-                  </div>
-                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
-                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Total Won</span>
-                    <span className="text-base font-black text-yellow-400">₹{wallet.totalWon.toLocaleString()}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Navigation Tabs */}
-              <div className="flex gap-2 mt-3 p-1 bg-neutral-950 border border-neutral-800 rounded-xl shrink-0">
-                <button
-                  onClick={() => setHistoryTab('transactions')}
-                  className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                    historyTab === 'transactions'
-                      ? 'bg-amber-500 text-neutral-950 shadow-md'
-                      : 'text-neutral-400 hover:text-white'
-                  }`}
-                >
-                  All Transactions ({wallet.transactions.length})
-                </button>
-                <button
-                  onClick={() => setHistoryTab('deposits')}
-                  className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                    historyTab === 'deposits'
-                      ? 'bg-emerald-500 text-white shadow-md'
-                      : 'text-neutral-400 hover:text-white'
-                  }`}
-                >
-                  Deposits / UTR ({playerDeposits.length})
-                </button>
-                <button
-                  onClick={() => setHistoryTab('withdrawals')}
-                  className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
-                    historyTab === 'withdrawals'
-                      ? 'bg-blue-500 text-white shadow-md'
-                      : 'text-neutral-400 hover:text-white'
-                  }`}
-                >
-                  Withdrawals ({playerWithdrawals.length})
-                </button>
-              </div>
-
-              {/* Tab Contents (Scrollable) */}
-              <div className="mt-3 flex-1 overflow-y-auto space-y-2 pr-1 min-h-[220px]">
-                {/* TAB 1: ALL TRANSACTIONS */}
-                {historyTab === 'transactions' && (
-                  wallet.transactions.length === 0 ? (
-                    <div className="h-44 flex flex-col items-center justify-center text-center p-4 text-neutral-500">
-                      <History className="w-8 h-8 stroke-1 mb-2 opacity-50" />
-                      <p className="text-xs font-semibold text-neutral-400">No transactions recorded yet</p>
-                      <p className="text-[11px] text-neutral-500">All your deposits, wagers, winnings, and payouts will be listed here permanently.</p>
-                    </div>
-                  ) : (
-                    wallet.transactions.map((txn) => {
-                      const isCredit = txn.type === 'deposit' || txn.type === 'win';
-                      return (
-                        <div
-                          key={txn.id}
-                          className="p-3 bg-neutral-950/70 border border-neutral-800/80 rounded-xl flex items-center justify-between gap-3 text-xs"
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                              isCredit ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'
-                            }`}>
-                              {isCredit ? <ArrowDownLeft className="w-4 h-4" /> : <ArrowUpRight className="w-4 h-4" />}
-                            </div>
-                            <div className="min-w-0">
-                              <p className="font-bold text-white truncate">{txn.description}</p>
-                              <div className="flex items-center gap-2 text-[10px] text-neutral-400">
-                                <span>{new Date(txn.timestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>
-                                <span>•</span>
-                                <span className="font-mono text-neutral-500">{txn.id}</span>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="text-right shrink-0">
-                            <span className={`font-black text-sm block ${
-                              isCredit ? 'text-emerald-400' : 'text-rose-400'
-                            }`}>
-                              {isCredit ? `+₹${txn.amount}` : `-₹${txn.amount}`}
-                            </span>
-                            <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${
-                              txn.status === 'success'
-                                ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-500/30'
-                                : txn.status === 'pending'
-                                ? 'bg-amber-950/60 text-amber-400 border border-amber-500/30'
-                                : 'bg-red-950/60 text-red-400 border border-red-500/30'
-                            }`}>
-                              {txn.status}
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )
-                )}
-
-                {/* TAB 2: DEPOSITS & UTR VERIFICATIONS */}
-                {historyTab === 'deposits' && (
-                  playerDeposits.length === 0 ? (
-                    <div className="h-44 flex flex-col items-center justify-center text-center p-4 text-neutral-500">
-                      <CreditCard className="w-8 h-8 stroke-1 mb-2 opacity-50" />
-                      <p className="text-xs font-semibold text-neutral-400">No deposit requests submitted yet</p>
-                      <button
-                        onClick={() => {
-                          setActiveModal(null);
-                          setDepositPaymentAmount(100);
-                        }}
-                        className="mt-3 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
-                      >
-                        Add Cash to Wallet
-                      </button>
-                    </div>
-                  ) : (
-                    playerDeposits.map((dep) => (
-                      <div
-                        key={dep.id}
-                        className="p-3 bg-neutral-950/70 border border-neutral-800/80 rounded-xl space-y-2 text-xs"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-black text-base text-emerald-400">₹{dep.amount}</span>
-                              <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border ${
-                                dep.status === 'completed'
-                                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/40'
-                                  : dep.status === 'pending'
-                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/40 animate-pulse'
-                                  : 'bg-rose-500/10 text-rose-300 border-rose-500/40'
-                              }`}>
-                                {dep.status === 'completed' ? 'Approved & Credited' : dep.status === 'pending' ? 'Verification Pending' : 'Rejected'}
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-neutral-400 mt-0.5 font-mono">
-                              UTR: <span className="text-white font-bold">{dep.utr}</span>
-                            </p>
-                            <p className="text-[10px] text-neutral-500">
-                              {new Date(dep.timestamp).toLocaleString()} • Ref: {dep.id}
-                            </p>
-                            {dep.rejectionReason && (
-                              <p className="text-[11px] text-rose-400 mt-1">
-                                Reason: {dep.rejectionReason}
-                              </p>
-                            )}
-                          </div>
-
-                          {/* Payment Screenshot Thumbnail & Lightbox Button */}
-                          {dep.screenshotUrl ? (
-                            <div className="shrink-0 flex flex-col items-center gap-1">
-                              <button
-                                onClick={() => setHistoryScreenshotPreview(dep.screenshotUrl)}
-                                className="group relative w-16 h-16 rounded-lg overflow-hidden border border-neutral-700 hover:border-amber-400 transition-all shadow-md cursor-pointer block"
-                                title="Click to view full payment screenshot"
-                              >
-                                <img
-                                  src={dep.screenshotUrl}
-                                  alt="Payment proof"
-                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                                />
-                                <div className="absolute inset-0 bg-black/40 group-hover:bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <Eye className="w-4 h-4 text-white" />
-                                </div>
-                              </button>
-                              <button
-                                onClick={() => setHistoryScreenshotPreview(dep.screenshotUrl)}
-                                className="text-[10px] text-amber-400 hover:underline font-semibold flex items-center gap-0.5"
-                              >
-                                <Eye className="w-3 h-3" /> View Proof
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-[10px] text-neutral-500 italic">No screenshot</span>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )
-                )}
-
-                {/* TAB 3: WITHDRAWAL REQUESTS */}
-                {historyTab === 'withdrawals' && (
-                  playerWithdrawals.length === 0 ? (
-                    <div className="h-44 flex flex-col items-center justify-center text-center p-4 text-neutral-500">
-                      <Building className="w-8 h-8 stroke-1 mb-2 opacity-50" />
-                      <p className="text-xs font-semibold text-neutral-400">No withdrawal requests found</p>
-                      <p className="text-[11px] text-neutral-500">When you request cash withdrawals to your UPI, they appear here.</p>
-                    </div>
-                  ) : (
-                    playerWithdrawals.map((req) => (
-                      <div
-                        key={req.id}
-                        className="p-3 bg-neutral-950/70 border border-neutral-800/80 rounded-xl flex items-center justify-between gap-3 text-xs"
-                      >
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-black text-base text-white">₹{req.amount}</span>
-                            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border ${
-                              req.status === 'completed'
-                                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/40'
-                                : req.status === 'pending'
-                                ? 'bg-amber-500/10 text-amber-300 border-amber-500/40'
-                                : 'bg-rose-500/10 text-rose-300 border-rose-500/40'
-                            }`}>
-                              {req.status === 'completed' ? 'Processed' : req.status === 'pending' ? 'Under Review' : 'Rejected'}
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-neutral-400 mt-0.5">
-                            To UPI: <span className="text-amber-400 font-mono font-bold">{req.playerUpi}</span>
-                          </p>
-                          <p className="text-[10px] text-neutral-500">
-                            {new Date(req.timestamp).toLocaleString()} • Ref: {req.id}
-                          </p>
-                          {req.rejectionReason && (
-                            <p className="text-[11px] text-rose-400 mt-1">
-                              Reason: {req.rejectionReason} (Amount refunded)
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )
-                )}
-              </div>
-
-              {/* Footer */}
-              <div className="mt-3 pt-3 border-t border-neutral-800 flex items-center justify-between text-xs text-neutral-400 shrink-0">
-                <span className="text-[11px]">Secure Carrom Royal Database • 100% Persisted</span>
-                <button
-                  onClick={() => setActiveModal(null)}
-                  className="px-4 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-xs"
-                >
-                  Close Passbook
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* --- PAYMENT SCREENSHOT LIGHTBOX MODAL --- */}
-      {historyScreenshotPreview && (
-        <div className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-neutral-900 border border-neutral-700 rounded-3xl p-4 space-y-3 shadow-2xl relative">
-            <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
-              <h4 className="font-bold text-sm text-white flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                Payment Proof Screenshot
-              </h4>
-              <button
-                onClick={() => setHistoryScreenshotPreview(null)}
-                className="w-7 h-7 rounded-full bg-neutral-800 hover:bg-neutral-700 flex items-center justify-center text-neutral-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="max-h-[70vh] overflow-auto rounded-xl bg-black border border-neutral-800 flex items-center justify-center p-1">
-              <img
-                src={historyScreenshotPreview}
-                alt="Payment proof screenshot"
-                className="max-h-[68vh] w-auto object-contain rounded-lg shadow-lg"
-              />
-            </div>
-            <div className="flex justify-end pt-1">
-              <button
-                onClick={() => setHistoryScreenshotPreview(null)}
-                className="px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-xs"
-              >
-                Close Preview
               </button>
             </div>
           </div>

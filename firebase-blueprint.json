@@ -1,0 +1,270 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Wallet & Profile",
+      "description": "Stores user balances, referral codes, and wagering statistics.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique identifier of the user"
+        },
+        "depositCoins": {
+          "type": "number",
+          "description": "Deposited cash coins balance"
+        },
+        "bonusCoins": {
+          "type": "number",
+          "description": "Bonus coins balance"
+        },
+        "withdrawableCoins": {
+          "type": "number",
+          "description": "Winnings coins balance that can be withdrawn"
+        },
+        "totalMatches": {
+          "type": "number",
+          "description": "Total matches played"
+        },
+        "wins": {
+          "type": "number",
+          "description": "Total matches won"
+        },
+        "referralCode": {
+          "type": "string",
+          "description": "User's referral code"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last wallet update"
+        }
+      },
+      "required": ["userId", "depositCoins", "bonusCoins", "withdrawableCoins"]
+    },
+    "DepositRequest": {
+      "title": "Deposit Request",
+      "description": "User deposit proof with UTR and verification status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique transaction ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID requesting deposit"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Amount deposited in INR"
+        },
+        "utrNumber": {
+          "type": "string",
+          "description": "Bank UTR or Transaction reference number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"],
+          "description": "Approval status"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Payment method used (e.g. UPI)"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO creation timestamp"
+        },
+        "adminNotes": {
+          "type": "string",
+          "description": "Optional notes from admin"
+        }
+      },
+      "required": ["id", "userId", "amount", "utrNumber", "status", "createdAt"]
+    },
+    "WithdrawalRequest": {
+      "title": "Withdrawal Request",
+      "description": "Player withdrawal request to UPI ID.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique withdrawal request ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID requesting withdrawal"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Amount requested to withdraw"
+        },
+        "upiId": {
+          "type": "string",
+          "description": "Target UPI ID for payout"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"],
+          "description": "Approval status"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO creation timestamp"
+        },
+        "adminNotes": {
+          "type": "string",
+          "description": "Optional notes from admin"
+        }
+      },
+      "required": ["id", "userId", "amount", "upiId", "status", "createdAt"]
+    },
+    "DepositConfig": {
+      "title": "Admin Deposit Configuration",
+      "description": "UPI ID, payee name, QR code image URL for deposits.",
+      "type": "object",
+      "properties": {
+        "upiId": {
+          "type": "string",
+          "description": "Admin UPI ID"
+        },
+        "payeeName": {
+          "type": "string",
+          "description": "Payee name displayed on QR code"
+        },
+        "qrImageUrl": {
+          "type": "string",
+          "description": "Custom QR image URL"
+        },
+        "minDeposit": {
+          "type": "number",
+          "description": "Minimum deposit amount"
+        },
+        "maxDeposit": {
+          "type": "number",
+          "description": "Maximum deposit amount"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["upiId", "payeeName"]
+    },
+    "AdminSecurity": {
+      "title": "Admin Security Configuration",
+      "description": "Server-side admin login credentials and custom URL slug.",
+      "type": "object",
+      "properties": {
+        "username": {
+          "type": "string",
+          "description": "Admin username"
+        },
+        "passwordHash": {
+          "type": "string",
+          "description": "Admin password"
+        },
+        "urlSlug": {
+          "type": "string",
+          "description": "Custom route slug to access admin panel"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last credentials update"
+        }
+      },
+      "required": ["username", "passwordHash", "urlSlug"]
+    },
+    "GameRoom": {
+      "title": "Multiplayer Game Room",
+      "description": "Real-time room session for 2 players matching via unique room ID.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "description": "6-digit unique room code"
+        },
+        "hostId": {
+          "type": "string",
+          "description": "UID of room creator"
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Display name of room creator"
+        },
+        "guestId": {
+          "type": "string",
+          "description": "UID of joining player"
+        },
+        "guestName": {
+          "type": "string",
+          "description": "Display name of joining player"
+        },
+        "entryFee": {
+          "type": "number",
+          "description": "Entry fee for the match"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "active", "finished"],
+          "description": "Room matchmaking status"
+        },
+        "turn": {
+          "type": "string",
+          "enum": ["host", "guest"],
+          "description": "Current turn"
+        },
+        "gameState": {
+          "type": "string",
+          "description": "JSON stringified current board state"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["roomId", "hostId", "hostName", "entryFee", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/User"
+      },
+      "description": "Player wallet and profile data"
+    },
+    "/deposit_requests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/DepositRequest"
+      },
+      "description": "User deposit requests submitted for admin approval"
+    },
+    "/withdrawal_requests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/WithdrawalRequest"
+      },
+      "description": "User withdrawal requests submitted for admin processing"
+    },
+    "/config/deposit": {
+      "schema": {
+        "$ref": "#/entities/DepositConfig"
+      },
+      "description": "Global admin deposit config for UPI/QR"
+    },
+    "/config/security": {
+      "schema": {
+        "$ref": "#/entities/AdminSecurity"
+      },
+      "description": "Global admin security credentials and URL slug"
+    },
+    "/game_rooms/{roomId}": {
+      "schema": {
+        "$ref": "#/entities/GameRoom"
+      },
+      "description": "Real-time 2-player game rooms"
+    }
+  }
+}

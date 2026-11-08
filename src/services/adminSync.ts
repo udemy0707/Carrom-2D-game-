@@ -1,16 +1,32 @@
 /**
- * Admin & Game Real-time Synchronization Service
- * Handles UPI Deposit details, Player UTR verification, and Withdrawal request processing.
- * Synced across tabs using BroadcastChannel and localStorage events.
+ * Admin & Game Real-time Synchronization Service backed by Firebase Firestore & Auth
+ * Handles UPI Deposit details, Player UTR verification, Withdrawal requests,
+ * Server-side Admin Credentials, and Real-time Multiplayer Matchmaking.
  */
+
+import {
+  db,
+  ensureFirebaseAuth,
+  handleFirestoreError,
+  OperationType,
+} from '../firebase';
+import {
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+  collection,
+  onSnapshot,
+} from 'firebase/firestore';
 
 export interface AdminDepositConfig {
   upiId: string;
   payeeName: string;
   qrImageUrl: string;
   instructions: string;
-  minDeposit: number; // default: 200
-  minWithdrawal: number; // default: 500
+  minDeposit: number;
+  maxDeposit?: number;
+  minWithdrawal: number;
   updatedAt: number;
 }
 
@@ -19,10 +35,11 @@ export interface DepositRequest {
   playerName: string;
   amount: number;
   utr: string;
-  screenshotUrl: string; // Base64 data URL of uploaded payment screenshot
+  screenshotUrl: string;
   timestamp: number;
   status: 'pending' | 'completed' | 'rejected';
   rejectionReason?: string;
+  userId?: string;
 }
 
 export interface WithdrawalRequest {
@@ -33,6 +50,7 @@ export interface WithdrawalRequest {
   timestamp: number;
   status: 'pending' | 'completed' | 'rejected';
   rejectionReason?: string;
+  userId?: string;
 }
 
 export interface PlayerTransaction {
@@ -56,11 +74,29 @@ export interface PlayerWalletData {
 
 export interface AdminSecurityConfig {
   username: string;
-  passwordHash: string; // Plain or hashed password
-  urlSlug: string; // e.g. "admin9999"
+  passwordHash: string;
+  urlSlug: string;
 }
 
-// Storage Keys
+export interface ServerGameRoom {
+  roomId: string;
+  hostId: string;
+  hostName: string;
+  guestId?: string;
+  guestName?: string;
+  entryFee: number;
+  totalPot: number;
+  winnerPrize: number;
+  platformRake: number;
+  status: 'waiting' | 'active' | 'finished';
+  turn: 'host' | 'guest';
+  gameState?: string;
+  winner?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Storage Keys & Firestore Paths
 const STORAGE_KEYS = {
   DEPOSIT_CONFIG: 'carrom_admin_deposit_config',
   DEPOSIT_REQUESTS: 'carrom_deposit_requests',
@@ -69,25 +105,25 @@ const STORAGE_KEYS = {
   WALLET: 'carrom_royal_wallet',
 };
 
-// Default Admin Deposit Config
+// Default Fallback Admin Deposit Config
 export const DEFAULT_DEPOSIT_CONFIG: AdminDepositConfig = {
   upiId: 'carromroyal.pay@okaxis',
   payeeName: 'Carrom Royal Official',
-  qrImageUrl: '', // Empty means dynamic vector QR will be rendered
+  qrImageUrl: '',
   instructions: 'Scan QR or pay directly to UPI ID. Copy and submit the 12-digit UTR/Reference number below.',
   minDeposit: 200,
   minWithdrawal: 500,
   updatedAt: Date.now(),
 };
 
-// Default Admin Security
+// Default Fallback Admin Security (Initial Server State)
 export const DEFAULT_SECURITY: AdminSecurityConfig = {
-  username: 'Admin',
-  passwordHash: 'Bihpuria7@',
-  urlSlug: 'admin9999',
+  username: 'admin',
+  passwordHash: 'admin123',
+  urlSlug: 'admin',
 };
 
-// Broadcast Channel for Instant Multi-tab synchronization
+// Broadcast Channel for Local Instant Sync
 let broadcastChannel: BroadcastChannel | null = null;
 try {
   if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -121,7 +157,6 @@ export function broadcastSync(type: SyncEventType, payload?: any) {
       console.warn('Broadcast failed:', e);
     }
   }
-  // Also dispatch a window CustomEvent for same-tab subscribers
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('carrom_admin_sync', { detail: msg }));
   }
@@ -155,17 +190,130 @@ export function subscribeToSync(callback: (msg: SyncMessage) => void): () => voi
     broadcastChannel.addEventListener('message', handleBroadcast);
   }
 
+  // Subscribe to real-time Firestore collections
+  const unsubConfig = onSnapshot(
+    doc(db, 'config', 'deposit'),
+    (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const updatedConfig: AdminDepositConfig = {
+          upiId: data.upiId || DEFAULT_DEPOSIT_CONFIG.upiId,
+          payeeName: data.payeeName || DEFAULT_DEPOSIT_CONFIG.payeeName,
+          qrImageUrl: data.qrImageUrl || DEFAULT_DEPOSIT_CONFIG.qrImageUrl,
+          instructions: DEFAULT_DEPOSIT_CONFIG.instructions,
+          minDeposit: data.minDeposit ?? DEFAULT_DEPOSIT_CONFIG.minDeposit,
+          maxDeposit: data.maxDeposit ?? 50000,
+          minWithdrawal: DEFAULT_DEPOSIT_CONFIG.minWithdrawal,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(STORAGE_KEYS.DEPOSIT_CONFIG, JSON.stringify(updatedConfig));
+        callback({ type: 'DEPOSIT_CONFIG_UPDATED', payload: updatedConfig, timestamp: Date.now() });
+      }
+    },
+    (err) => {
+      console.warn('Firestore deposit config sub error:', err.message);
+    }
+  );
+
+  const unsubSecurity = onSnapshot(
+    doc(db, 'config', 'security'),
+    (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const updatedSec: AdminSecurityConfig = {
+          username: data.username || DEFAULT_SECURITY.username,
+          passwordHash: data.passwordHash || DEFAULT_SECURITY.passwordHash,
+          urlSlug: data.urlSlug || DEFAULT_SECURITY.urlSlug,
+        };
+        localStorage.setItem(STORAGE_KEYS.SECURITY, JSON.stringify(updatedSec));
+        callback({ type: 'SECURITY_UPDATED', payload: updatedSec, timestamp: Date.now() });
+      } else {
+        // Initialize default security on server if not present
+        setDoc(doc(db, 'config', 'security'), {
+          username: DEFAULT_SECURITY.username,
+          passwordHash: DEFAULT_SECURITY.passwordHash,
+          urlSlug: DEFAULT_SECURITY.urlSlug,
+          updatedAt: new Date().toISOString(),
+        }).catch((err) => console.warn('Init server security error:', err));
+      }
+    },
+    (err) => {
+      console.warn('Firestore security sub error:', err.message);
+    }
+  );
+
+  const unsubDeposits = onSnapshot(
+    collection(db, 'deposit_requests'),
+    (snap) => {
+      const items: DepositRequest[] = [];
+      snap.forEach((d) => {
+        const val = d.data();
+        const rawStatus = val.status || 'pending';
+        items.push({
+          id: val.id || d.id,
+          playerName: val.playerName || val.userId || 'Player',
+          amount: val.amount || 0,
+          utr: val.utrNumber || '',
+          screenshotUrl: val.screenshotUrl || (val.paymentMethod?.startsWith('data:image') ? val.paymentMethod : ''),
+          timestamp: val.createdAt ? new Date(val.createdAt).getTime() : Date.now(),
+          status: rawStatus === 'approved' ? 'completed' : (rawStatus as any),
+          rejectionReason: val.adminNotes,
+          userId: val.userId,
+        });
+      });
+      if (items.length > 0) {
+        localStorage.setItem(STORAGE_KEYS.DEPOSIT_REQUESTS, JSON.stringify(items));
+        callback({ type: 'DEPOSIT_REQUESTED', payload: items, timestamp: Date.now() });
+      }
+    },
+    (err) => {
+      console.warn('Firestore deposit requests sub error:', err.message);
+    }
+  );
+
+  const unsubWithdrawals = onSnapshot(
+    collection(db, 'withdrawal_requests'),
+    (snap) => {
+      const items: WithdrawalRequest[] = [];
+      snap.forEach((d) => {
+        const val = d.data();
+        const rawStatus = val.status || 'pending';
+        items.push({
+          id: val.id || d.id,
+          playerName: val.playerName || val.userId || 'Player',
+          amount: val.amount || 0,
+          playerUpi: val.upiId || '',
+          timestamp: val.createdAt ? new Date(val.createdAt).getTime() : Date.now(),
+          status: rawStatus === 'approved' ? 'completed' : (rawStatus as any),
+          rejectionReason: val.adminNotes,
+          userId: val.userId,
+        });
+      });
+      if (items.length > 0) {
+        localStorage.setItem(STORAGE_KEYS.WITHDRAWAL_REQUESTS, JSON.stringify(items));
+        callback({ type: 'WITHDRAWAL_REQUESTED', payload: items, timestamp: Date.now() });
+      }
+    },
+    (err) => {
+      console.warn('Firestore withdrawal requests sub error:', err.message);
+    }
+  );
+
   return () => {
     window.removeEventListener('carrom_admin_sync', handleCustomEvent);
     window.removeEventListener('storage', handleStorage);
     if (broadcastChannel) {
       broadcastChannel.removeEventListener('message', handleBroadcast);
     }
+    unsubConfig();
+    unsubSecurity();
+    unsubDeposits();
+    unsubWithdrawals();
   };
 }
 
 /* ==========================================================================
-   CONFIG & DATA ACCESSORS
+   CONFIG & DATA ACCESSORS (SERVER BACKED WITH LOCAL FALLBACK)
    ========================================================================== */
 
 export function getAdminDepositConfig(): AdminDepositConfig {
@@ -185,7 +333,7 @@ export function getAdminDepositConfig(): AdminDepositConfig {
   }
 }
 
-export function saveAdminDepositConfig(config: Partial<AdminDepositConfig>): AdminDepositConfig {
+export async function saveAdminDepositConfig(config: Partial<AdminDepositConfig>): Promise<AdminDepositConfig> {
   const current = getAdminDepositConfig();
   const updated: AdminDepositConfig = {
     ...current,
@@ -194,6 +342,21 @@ export function saveAdminDepositConfig(config: Partial<AdminDepositConfig>): Adm
   };
   localStorage.setItem(STORAGE_KEYS.DEPOSIT_CONFIG, JSON.stringify(updated));
   broadcastSync('DEPOSIT_CONFIG_UPDATED', updated);
+
+  try {
+    await ensureFirebaseAuth();
+    await setDoc(doc(db, 'config', 'deposit'), {
+      upiId: updated.upiId,
+      payeeName: updated.payeeName,
+      qrImageUrl: updated.qrImageUrl || '',
+      minDeposit: updated.minDeposit,
+      maxDeposit: 50000,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('Failed to sync deposit config to Firestore:', err);
+  }
+
   return updated;
 }
 
@@ -208,7 +371,7 @@ export function getAdminSecurity(): AdminSecurityConfig {
   }
 }
 
-export function saveAdminSecurity(security: Partial<AdminSecurityConfig>): AdminSecurityConfig {
+export async function saveAdminSecurity(security: Partial<AdminSecurityConfig>): Promise<AdminSecurityConfig> {
   const current = getAdminSecurity();
   const updated: AdminSecurityConfig = {
     ...current,
@@ -216,11 +379,152 @@ export function saveAdminSecurity(security: Partial<AdminSecurityConfig>): Admin
   };
   localStorage.setItem(STORAGE_KEYS.SECURITY, JSON.stringify(updated));
   broadcastSync('SECURITY_UPDATED', updated);
+
+  try {
+    await ensureFirebaseAuth();
+    await setDoc(doc(db, 'config', 'security'), {
+      username: updated.username,
+      passwordHash: updated.passwordHash,
+      urlSlug: updated.urlSlug.toLowerCase(),
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('Failed to save admin security to Firestore:', err);
+  }
+
   return updated;
 }
 
 /* ==========================================================================
-   PERMANENT PLAYER DATA & WALLET STORAGE (NO HARDCODED VALUES)
+   REAL-TIME MULTIPLAYER ROOM MATCHMAKING (FIRESTORE BACKED)
+   ========================================================================== */
+
+export async function createMultiplayerRoom(playerName: string, entryFee: number): Promise<ServerGameRoom> {
+  const user = await ensureFirebaseAuth();
+  const roomId = Math.floor(100000 + Math.random() * 900000).toString();
+  const totalPot = entryFee * 2;
+  const platformRake = Math.round(totalPot * 0.1);
+  const winnerPrize = totalPot - platformRake;
+
+  const room: ServerGameRoom = {
+    roomId,
+    hostId: user.uid,
+    hostName: playerName.trim() || 'Host Player',
+    entryFee,
+    totalPot,
+    winnerPrize,
+    platformRake,
+    status: 'waiting',
+    turn: 'host',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    await setDoc(doc(db, 'game_rooms', roomId), room);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `game_rooms/${roomId}`);
+  }
+
+  return room;
+}
+
+export async function joinMultiplayerRoom(
+  roomIdInput: string,
+  playerName: string
+): Promise<{ success: boolean; room?: ServerGameRoom; error?: string }> {
+  let cleanCode = roomIdInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!cleanCode) {
+    return { success: false, error: 'Please enter a valid Room Code.' };
+  }
+
+  const user = await ensureFirebaseAuth();
+
+  try {
+    let docRef = doc(db, 'game_rooms', cleanCode);
+    let snap = await getDoc(docRef);
+
+    if (!snap.exists() && cleanCode.startsWith('CR')) {
+      const numericCode = cleanCode.replace(/^CR/, '');
+      if (numericCode) {
+        docRef = doc(db, 'game_rooms', numericCode);
+        snap = await getDoc(docRef);
+      }
+    }
+
+    if (!snap.exists()) {
+      return { success: false, error: `Room "${roomIdInput.trim()}" not found. Please verify the code with the host.` };
+    }
+
+    const data = snap.data() as ServerGameRoom;
+    if (data.status !== 'waiting' && data.hostId !== user.uid) {
+      return { success: false, error: `Room "${cleanCode}" is already full or completed.` };
+    }
+
+    if (data.hostId === user.uid) {
+      return { success: true, room: data };
+    }
+
+    const updatedData = {
+      guestId: user.uid,
+      guestName: playerName.trim() || 'Guest Player',
+      status: 'active' as const,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await updateDoc(docRef, updatedData);
+
+    const fullRoom: ServerGameRoom = {
+      ...data,
+      ...updatedData,
+    };
+
+    return { success: true, room: fullRoom };
+  } catch (err) {
+    console.error('Error joining room:', err);
+    return { success: false, error: 'Failed to join room. Please check code.' };
+  }
+}
+
+export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom) => void): () => void {
+  return onSnapshot(
+    doc(db, 'game_rooms', roomId),
+    (snap) => {
+      if (snap.exists()) {
+        callback(snap.data() as ServerGameRoom);
+      }
+    },
+    (err) => {
+      console.warn('Room subscription error:', err.message);
+    }
+  );
+}
+
+export async function updateRoomGameState(
+  roomId: string,
+  gameState: any,
+  turn?: 'host' | 'guest',
+  status?: 'waiting' | 'active' | 'finished',
+  winner?: string
+): Promise<void> {
+  try {
+    const docRef = doc(db, 'game_rooms', roomId);
+    const updatePayload: any = {
+      gameState: typeof gameState === 'string' ? gameState : JSON.stringify(gameState),
+      updatedAt: new Date().toISOString(),
+    };
+    if (turn) updatePayload.turn = turn;
+    if (status) updatePayload.status = status;
+    if (winner) updatePayload.winner = winner;
+
+    await updateDoc(docRef, updatePayload);
+  } catch (err) {
+    console.warn('Failed to update room state:', err);
+  }
+}
+
+/* ==========================================================================
+   PERMANENT PLAYER DATA & WALLET STORAGE WITH FIRESTORE REPLICATION
    ========================================================================== */
 
 function getPlayerStorageKey(playerName?: string): string {
@@ -237,7 +541,6 @@ export function getPlayerWallet(playerName?: string): PlayerWalletData {
     const playerKey = getPlayerStorageKey(playerName);
     let raw = localStorage.getItem(playerKey);
     if (!raw && playerKey !== STORAGE_KEYS.WALLET) {
-      // Fallback to active wallet key
       raw = localStorage.getItem(STORAGE_KEYS.WALLET);
     }
 
@@ -246,14 +549,11 @@ export function getPlayerWallet(playerName?: string): PlayerWalletData {
     }
 
     const parsed = JSON.parse(raw);
-
-    // Clean out any legacy artificial initial deposit mock if present
     const cleanedTransactions: PlayerTransaction[] = Array.isArray(parsed.transactions)
       ? parsed.transactions.filter((t: any) => t && t.id !== 'TXN-INIT-001')
       : [];
 
     let realBal = Number(parsed.realBalance) || 0;
-    // If only legacy fake initial transaction was present and balance was 1000, sanitize to 0
     if (parsed.transactions?.length === 1 && parsed.transactions[0]?.id === 'TXN-INIT-001' && realBal === 1000) {
       realBal = 0;
     }
@@ -271,7 +571,7 @@ export function getPlayerWallet(playerName?: string): PlayerWalletData {
   }
 }
 
-export function savePlayerWallet(wallet: PlayerWalletData, playerName?: string, broadcast: boolean = true): void {
+export async function savePlayerWallet(wallet: PlayerWalletData, playerName?: string, broadcast: boolean = true): Promise<void> {
   if (typeof window === 'undefined') return;
 
   try {
@@ -289,26 +589,37 @@ export function savePlayerWallet(wallet: PlayerWalletData, playerName?: string, 
     const prevPlayer = localStorage.getItem(playerKey);
     const prevGlobal = localStorage.getItem(STORAGE_KEYS.WALLET);
 
-    // Persist to global active wallet
     localStorage.setItem(STORAGE_KEYS.WALLET, serialized);
-
-    // Persist to specific player profile key if name provided
     if (playerName && playerName.trim()) {
       localStorage.setItem(playerKey, serialized);
     }
 
-    // Only broadcast if something actually changed AND broadcast was requested
     const hasChanged = prevPlayer !== serialized || prevGlobal !== serialized;
     if (broadcast && hasChanged) {
       broadcastSync('WALLET_UPDATED', sanitized);
     }
+
+    ensureFirebaseAuth().then((user) => {
+      const userId = user.uid;
+      setDoc(doc(db, 'users', userId), {
+        userId,
+        depositCoins: sanitized.realBalance,
+        bonusCoins: 0,
+        withdrawableCoins: sanitized.realBalance,
+        totalMatches: sanitized.matchesPlayed,
+        wins: sanitized.matchesWon,
+        updatedAt: new Date().toISOString(),
+      }).catch((err) => {
+        console.warn('Firestore user wallet sync error:', err.message);
+      });
+    });
   } catch (err) {
     console.error('Failed to save player wallet permanently:', err);
   }
 }
 
 /* ==========================================================================
-   DEPOSIT REQUESTS (WITH MANDATORY PAYMENT SCREENSHOT)
+   DEPOSIT REQUESTS
    ========================================================================== */
 
 export function getDepositRequests(): DepositRequest[] {
@@ -326,31 +637,34 @@ export function getPlayerDepositHistory(playerName: string): DepositRequest[] {
   return getDepositRequests().filter((r) => (r.playerName || '').trim().toLowerCase() === norm);
 }
 
-export function submitDepositRequest(params: {
+export async function submitDepositRequest(params: {
   playerName: string;
   amount: number;
   utr: string;
   screenshotUrl: string;
-}): DepositRequest {
+}): Promise<DepositRequest> {
   if (!params.screenshotUrl || !params.screenshotUrl.trim()) {
     throw new Error('Payment screenshot is strictly required.');
   }
 
-  const requests = getDepositRequests();
+  const user = await ensureFirebaseAuth();
+  const requestId = `DEP-${Date.now().toString().slice(-6)}`;
+  
   const newRequest: DepositRequest = {
-    id: `DEP-${Date.now().toString().slice(-6)}`,
+    id: requestId,
     playerName: params.playerName.trim() || 'Player',
     amount: params.amount,
     utr: params.utr.trim(),
     screenshotUrl: params.screenshotUrl,
     timestamp: Date.now(),
     status: 'pending',
+    userId: user.uid,
   };
 
+  const requests = getDepositRequests();
   const updated = [newRequest, ...requests];
   localStorage.setItem(STORAGE_KEYS.DEPOSIT_REQUESTS, JSON.stringify(updated));
 
-  // Permanently record in player's wallet ledger as pending verification
   const currentWallet = getPlayerWallet(params.playerName);
   const updatedWallet: PlayerWalletData = {
     ...currentWallet,
@@ -368,17 +682,33 @@ export function submitDepositRequest(params: {
       ...currentWallet.transactions,
     ],
   };
-  savePlayerWallet(updatedWallet, params.playerName);
-
+  await savePlayerWallet(updatedWallet, params.playerName);
   broadcastSync('DEPOSIT_REQUESTED', newRequest);
+
+  try {
+    await setDoc(doc(db, 'deposit_requests', requestId), {
+      id: requestId,
+      userId: user.uid,
+      playerName: params.playerName.trim() || 'Player',
+      amount: params.amount,
+      utrNumber: params.utr.trim(),
+      screenshotUrl: params.screenshotUrl,
+      status: 'pending',
+      paymentMethod: 'UPI',
+      createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `deposit_requests/${requestId}`);
+  }
+
   return newRequest;
 }
 
-export function updateDepositStatus(
+export async function updateDepositStatus(
   requestId: string,
   status: 'completed' | 'rejected',
   rejectionReason?: string
-): DepositRequest | null {
+): Promise<DepositRequest | null> {
   const requests = getDepositRequests();
   const index = requests.findIndex((r) => r.id === requestId);
   if (index === -1) return null;
@@ -389,7 +719,6 @@ export function updateDepositStatus(
 
   localStorage.setItem(STORAGE_KEYS.DEPOSIT_REQUESTS, JSON.stringify(requests));
 
-  // If completed, credit player's permanent balance and mark transaction successful
   if (status === 'completed') {
     creditPlayerWallet(target.amount, target.utr, target.playerName, target.id);
   } else if (status === 'rejected') {
@@ -397,6 +726,18 @@ export function updateDepositStatus(
   }
 
   broadcastSync('DEPOSIT_STATUS_UPDATED', { request: target, status });
+
+  try {
+    await ensureFirebaseAuth();
+    const docRef = doc(db, 'deposit_requests', requestId);
+    await updateDoc(docRef, {
+      status: status === 'completed' ? 'approved' : 'rejected',
+      adminNotes: rejectionReason || '',
+    });
+  } catch (err) {
+    console.warn('Failed to update deposit status in Firestore:', err);
+  }
+
   return target;
 }
 
@@ -427,18 +768,20 @@ export function getPlayerWithdrawalHistory(playerName: string): WithdrawalReques
   return getWithdrawalRequests().filter((r) => (r.playerName || '').trim().toLowerCase() === norm);
 }
 
-export function submitWithdrawalRequest(params: {
+export async function submitWithdrawalRequest(params: {
   playerName: string;
   amount: number;
   playerUpi: string;
-}): { success: boolean; request?: WithdrawalRequest; error?: string } {
+}): Promise<{ success: boolean; request?: WithdrawalRequest; error?: string }> {
   const currentWallet = getPlayerWallet(params.playerName);
 
   if (currentWallet.realBalance < params.amount) {
     return { success: false, error: 'Insufficient real balance' };
   }
 
-  // Deduct/hold from realBalance immediately and record in ledger
+  const user = await ensureFirebaseAuth();
+  const requestId = `WTH-${Date.now().toString().slice(-6)}`;
+
   const updatedWallet: PlayerWalletData = {
     ...currentWallet,
     realBalance: Math.max(0, currentWallet.realBalance - params.amount),
@@ -455,30 +798,45 @@ export function submitWithdrawalRequest(params: {
     ],
   };
 
-  savePlayerWallet(updatedWallet, params.playerName);
+  await savePlayerWallet(updatedWallet, params.playerName);
 
   const requests = getWithdrawalRequests();
   const newRequest: WithdrawalRequest = {
-    id: `WTH-${Date.now().toString().slice(-6)}`,
+    id: requestId,
     playerName: params.playerName.trim() || 'Player',
     amount: params.amount,
     playerUpi: params.playerUpi.trim(),
     timestamp: Date.now(),
     status: 'pending',
+    userId: user.uid,
   };
 
   const updated = [newRequest, ...requests];
   localStorage.setItem(STORAGE_KEYS.WITHDRAWAL_REQUESTS, JSON.stringify(updated));
   broadcastSync('WITHDRAWAL_REQUESTED', newRequest);
 
+  try {
+    await setDoc(doc(db, 'withdrawal_requests', requestId), {
+      id: requestId,
+      userId: user.uid,
+      playerName: params.playerName.trim() || 'Player',
+      amount: params.amount,
+      upiId: params.playerUpi.trim(),
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `withdrawal_requests/${requestId}`);
+  }
+
   return { success: true, request: newRequest };
 }
 
-export function updateWithdrawalStatus(
+export async function updateWithdrawalStatus(
   requestId: string,
   status: 'completed' | 'rejected',
   rejectionReason?: string
-): WithdrawalRequest | null {
+): Promise<WithdrawalRequest | null> {
   const requests = getWithdrawalRequests();
   const index = requests.findIndex((r) => r.id === requestId);
   if (index === -1) return null;
@@ -489,22 +847,31 @@ export function updateWithdrawalStatus(
 
   localStorage.setItem(STORAGE_KEYS.WITHDRAWAL_REQUESTS, JSON.stringify(requests));
 
-  // If rejected, refund the funds back to player's wallet permanently!
   if (status === 'rejected') {
     refundPlayerWallet(target.amount, target.id, target.playerName);
   } else if (status === 'completed') {
-    // Update matching transaction in player's wallet to success
     updateWalletTransactionStatus(target.playerName, `WTH-${requestId}`, 'success');
   }
 
   broadcastSync('WITHDRAWAL_STATUS_UPDATED', { request: target, status });
+
+  try {
+    await ensureFirebaseAuth();
+    const docRef = doc(db, 'withdrawal_requests', requestId);
+    await updateDoc(docRef, {
+      status: status === 'completed' ? 'approved' : 'rejected',
+      adminNotes: rejectionReason || '',
+    });
+  } catch (err) {
+    console.warn('Failed to update withdrawal status in Firestore:', err);
+  }
+
   return target;
 }
 
 export function deleteWithdrawalRequest(requestId: string): boolean {
   const requests = getWithdrawalRequests();
   const target = requests.find((r) => r.id === requestId);
-  // If the deleted request was pending, refund the money to user's wallet automatically
   if (target && target.status === 'pending') {
     refundPlayerWallet(target.amount, target.id, target.playerName);
   }
@@ -515,7 +882,7 @@ export function deleteWithdrawalRequest(requestId: string): boolean {
 }
 
 /* ==========================================================================
-   WALLET SYNC HELPERS (PERMANENT & CONSISTENT)
+   WALLET SYNC HELPERS
    ========================================================================== */
 
 function creditPlayerWallet(amount: number, utr: string, playerName?: string, requestId?: string) {
@@ -523,7 +890,6 @@ function creditPlayerWallet(amount: number, utr: string, playerName?: string, re
     const current = getPlayerWallet(playerName);
     const updatedBalance = current.realBalance + amount;
 
-    // Check if there is an existing pending deposit transaction for this requestId or utr
     let found = false;
     const updatedTxns = current.transactions.map((t) => {
       if (!found && (
@@ -646,20 +1012,19 @@ function updateWalletTransactionStatus(playerName: string | undefined, keyword: 
 }
 
 /* ==========================================================================
-   URL & ROUTE DETECTION (MATCHES /admin9999, /Admin9999, #admin9999, etc.)
+   URL & ROUTE DETECTION (MATCHES CONFIGURED SLUG IN FIRESTORE OR FALLBACK)
    ========================================================================== */
 
 export function checkIsAdminUrl(): boolean {
   if (typeof window === 'undefined') return false;
 
   const security = getAdminSecurity();
-  const configuredSlug = (security.urlSlug || 'admin9999').toLowerCase();
+  const configuredSlug = (security.urlSlug || 'admin').toLowerCase();
 
   const path = window.location.pathname.toLowerCase().replace(/^\/+|\/+$/g, '');
   const hash = window.location.hash.toLowerCase().replace(/^#\/?|\/+$/g, '');
   const search = window.location.search.toLowerCase();
 
-  // Match case-insensitively against path, hash, or search param
   if (path === configuredSlug) return true;
   if (hash === configuredSlug) return true;
   if (search.includes(configuredSlug) || search.includes(`admin`)) {
@@ -667,9 +1032,6 @@ export function checkIsAdminUrl(): boolean {
       return true;
     }
   }
-
-  // Also fallback check for default "admin9999"
-  if (path === 'admin9999' || hash === 'admin9999') return true;
 
   return false;
 }
