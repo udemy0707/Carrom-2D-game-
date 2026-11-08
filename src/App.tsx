@@ -37,7 +37,8 @@ import {
   Shield,
   ArrowUpRight,
   ArrowDownLeft,
-  QrCode
+  QrCode,
+  Eye
 } from 'lucide-react';
 
 import { AdminPanel } from './components/AdminPanel';
@@ -48,7 +49,14 @@ import {
   submitWithdrawalRequest,
   getWithdrawalRequests,
   getAdminDepositConfig,
-  WithdrawalRequest
+  WithdrawalRequest,
+  DepositRequest,
+  getPlayerWallet,
+  savePlayerWallet,
+  getPlayerDepositHistory,
+  getPlayerWithdrawalHistory,
+  PlayerWalletData,
+  PlayerTransaction
 } from './services/adminSync';
 
 /* ==========================================================================
@@ -379,37 +387,7 @@ interface FloatingScore {
   vy: number;
 }
 
-interface WalletState {
-  realBalance: number;
-  totalWon: number;
-  matchesPlayed: number;
-  matchesWon: number;
-  transactions: Array<{
-    id: string;
-    type: 'deposit' | 'withdrawal' | 'entry' | 'win';
-    amount: number;
-    description: string;
-    timestamp: number;
-    status: 'success' | 'pending';
-  }>;
-}
-
-const DEFAULT_WALLET: WalletState = {
-  realBalance: 1000,
-  totalWon: 0,
-  matchesPlayed: 0,
-  matchesWon: 0,
-  transactions: [
-    {
-      id: 'TXN-INIT-001',
-      type: 'deposit',
-      amount: 1000,
-      description: 'Initial Real Balance',
-      timestamp: Date.now() - 3600000,
-      status: 'success',
-    },
-  ],
-};
+type WalletState = PlayerWalletData;
 
 interface GameRoom {
   gameId: string;
@@ -731,15 +709,15 @@ export default function App() {
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [copyNotification, setCopyNotification] = useState(false);
 
-  // Economy state
+  // Economy state - strictly permanent player wallet, zero hardcoded balance
   const [wallet, setWallet] = useState<WalletState>(() => {
-    try {
-      const saved = localStorage.getItem('carrom_royal_wallet');
-      return saved ? JSON.parse(saved) : DEFAULT_WALLET;
-    } catch {
-      return DEFAULT_WALLET;
-    }
+    return getPlayerWallet(playerName);
   });
+
+  // History & Passbook Modal states
+  const [historyTab, setHistoryTab] = useState<'transactions' | 'deposits' | 'withdrawals'>('transactions');
+  const [historyScreenshotPreview, setHistoryScreenshotPreview] = useState<string | null>(null);
+  const [insufficientBalanceNotice, setInsufficientBalanceNotice] = useState<{ required: number; available: number } | null>(null);
 
   const [soundMuted, setSoundMuted] = useState(false);
 
@@ -853,16 +831,12 @@ export default function App() {
     soundEngine.enabled = !soundMuted;
   }, [soundMuted]);
 
-  // Wallet persistence
+  // Permanent Wallet persistence (do not broadcast back to self to prevent infinite update loops)
   useEffect(() => {
-    try {
-      localStorage.setItem('carrom_royal_wallet', JSON.stringify(wallet));
-    } catch {
-      // storage failed
-    }
-  }, [wallet]);
+    savePlayerWallet(wallet, playerName, false);
+  }, [wallet, playerName]);
 
-  // Player Name persistence
+  // Player Name persistence & data binding
   useEffect(() => {
     try {
       localStorage.setItem('carrom_player_name', playerName);
@@ -893,15 +867,35 @@ export default function App() {
       } else if (
         msg.type === 'WALLET_UPDATED' ||
         msg.type === 'WITHDRAWAL_STATUS_UPDATED' ||
-        msg.type === 'DEPOSIT_STATUS_UPDATED'
+        msg.type === 'DEPOSIT_STATUS_UPDATED' ||
+        msg.type === 'DEPOSIT_REQUESTED' ||
+        msg.type === 'WITHDRAWAL_REQUESTED'
       ) {
-        const saved = localStorage.getItem('carrom_royal_wallet');
-        if (saved) {
-          try {
-            setWallet(JSON.parse(saved));
-          } catch {}
-        }
-        setRecentWithdrawals(getWithdrawalRequests().filter((r) => r.playerName === playerName));
+        const fresh = getPlayerWallet(playerName);
+        setWallet((prev) => {
+          if (
+            prev.realBalance === fresh.realBalance &&
+            prev.totalWon === fresh.totalWon &&
+            prev.matchesPlayed === fresh.matchesPlayed &&
+            prev.matchesWon === fresh.matchesWon &&
+            prev.transactions.length === fresh.transactions.length &&
+            JSON.stringify(prev.transactions) === JSON.stringify(fresh.transactions)
+          ) {
+            return prev;
+          }
+          return fresh;
+        });
+
+        const freshWithdrawals = getWithdrawalRequests().filter((r) => r.playerName === playerName);
+        setRecentWithdrawals((prev) => {
+          if (
+            prev.length === freshWithdrawals.length &&
+            JSON.stringify(prev) === JSON.stringify(freshWithdrawals)
+          ) {
+            return prev;
+          }
+          return freshWithdrawals;
+        });
       }
     });
 
@@ -1138,29 +1132,33 @@ export default function App() {
   const startMatchWithBet = (room: GameRoom) => {
     if (room.betAmount > 0) {
       if (wallet.realBalance < room.betAmount) {
-        // Auto reload balance for seamless non-stop gameplay
-        setWallet((prev) => ({
-          ...prev,
-          realBalance: prev.realBalance + room.betAmount + 1000,
-        }));
+        setInsufficientBalanceNotice({
+          required: room.betAmount,
+          available: wallet.realBalance,
+        });
+        return;
       }
 
-      setWallet((prev) => ({
-        ...prev,
-        realBalance: Math.max(0, prev.realBalance - room.betAmount),
-        matchesPlayed: prev.matchesPlayed + 1,
-        transactions: [
-          {
-            id: `TXN-ENTRY-${Date.now().toString().slice(-6)}`,
-            type: 'entry',
-            amount: room.betAmount,
-            description: `Match Entry for Room ${room.gameId} (Pot: ₹${room.totalPot})`,
-            timestamp: Date.now(),
-            status: 'success',
-          },
-          ...prev.transactions,
-        ],
-      }));
+      setWallet((prev) => {
+        const updated: WalletState = {
+          ...prev,
+          realBalance: Math.max(0, prev.realBalance - room.betAmount),
+          matchesPlayed: prev.matchesPlayed + 1,
+          transactions: [
+            {
+              id: `TXN-ENTRY-${Date.now().toString().slice(-6)}`,
+              type: 'entry',
+              amount: room.betAmount,
+              description: `Match Entry for Room ${room.gameId} (Pot: ₹${room.totalPot})`,
+              timestamp: Date.now(),
+              status: 'success',
+            },
+            ...prev.transactions,
+          ],
+        };
+        savePlayerWallet(updated, playerName);
+        return updated;
+      });
     }
 
     setActiveRoom(room);
@@ -1174,10 +1172,11 @@ export default function App() {
   const handleRematch = () => {
     setGameOverResult(null);
     if (wallet.realBalance < activeRoom.betAmount) {
-      setWallet((prev) => ({
-        ...prev,
-        realBalance: prev.realBalance + activeRoom.betAmount + 1000,
-      }));
+      setInsufficientBalanceNotice({
+        required: activeRoom.betAmount,
+        available: wallet.realBalance,
+      });
+      return;
     }
     const rematchRoom: GameRoom = {
       ...activeRoom,
@@ -1224,6 +1223,14 @@ export default function App() {
      CREATE GAME FLOW
      ========================================================================== */
   const handleCreateRoom = () => {
+    if (wallet.realBalance < selectedBet) {
+      setInsufficientBalanceNotice({
+        required: selectedBet,
+        available: wallet.realBalance,
+      });
+      return;
+    }
+
     const randomId = `CR-${Math.floor(1000 + Math.random() * 9000)}`;
     const bet = selectedBet;
     const totalPot = bet * 2;
@@ -1251,6 +1258,14 @@ export default function App() {
   const handleJoinRoomWithCode = () => {
     const code = joinCodeInput.trim().toUpperCase();
     if (!code) return;
+
+    if (wallet.realBalance < selectedBet) {
+      setInsufficientBalanceNotice({
+        required: selectedBet,
+        available: wallet.realBalance,
+      });
+      return;
+    }
 
     const bet = selectedBet;
     const totalPot = bet * 2;
@@ -1629,23 +1644,27 @@ export default function App() {
       if (winner === 'player') {
         soundEngine.playVictory();
         if (prizeWon > 0) {
-          setWallet((prev) => ({
-            ...prev,
-            realBalance: prev.realBalance + prizeWon,
-            totalWon: prev.totalWon + prizeWon,
-            matchesWon: prev.matchesWon + 1,
-            transactions: [
-              {
-                id: `TXN-WIN-${Date.now().toString().slice(-6)}`,
-                type: 'win',
-                amount: prizeWon,
-                description: `Victory in Room ${activeRoom.gameId} (10% Rake Deducted)`,
-                timestamp: Date.now(),
-                status: 'success',
-              },
-              ...prev.transactions,
-            ],
-          }));
+          setWallet((prev) => {
+            const updated: WalletState = {
+              ...prev,
+              realBalance: prev.realBalance + prizeWon,
+              totalWon: prev.totalWon + prizeWon,
+              matchesWon: prev.matchesWon + 1,
+              transactions: [
+                {
+                  id: `TXN-WIN-${Date.now().toString().slice(-6)}`,
+                  type: 'win',
+                  amount: prizeWon,
+                  description: `Victory in Room ${activeRoom.gameId} (10% Rake Deducted)`,
+                  timestamp: Date.now(),
+                  status: 'success',
+                },
+                ...prev.transactions,
+              ],
+            };
+            savePlayerWallet(updated, playerName);
+            return updated;
+          });
         }
       }
 
@@ -3208,6 +3227,24 @@ export default function App() {
           <MessageCircle className="w-6 h-6 text-neutral-900 fill-neutral-900" />
         </button>
 
+        {/* Center: Live Real Balance & Passbook Quick Access */}
+        <button
+          onClick={() => setActiveModal('history')}
+          className="px-3.5 py-2 rounded-2xl bg-black/60 hover:bg-black/80 border border-white/10 hover:border-amber-400/50 backdrop-blur-md flex items-center gap-2 shadow-lg active:scale-95 transition-all"
+          title="Open Account Passbook & History"
+        >
+          <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-xs">
+            ₹
+          </div>
+          <div className="text-left leading-none">
+            <span className="text-[9px] text-neutral-400 font-semibold block">Wallet</span>
+            <span className="font-display font-black text-sm text-emerald-400 tabular-nums">
+              ₹{wallet.realBalance}
+            </span>
+          </div>
+          <History className="w-3.5 h-3.5 text-neutral-400" />
+        </button>
+
         {/* Bottom Right: Menu Button */}
         <button
           onClick={() => setActiveModal('menu')}
@@ -3505,9 +3542,20 @@ export default function App() {
               >
                 <span className="flex items-center gap-2">
                   <Coins className="w-4 h-4 text-emerald-400" />
-                  Wallet Balance
+                  Deposit Funds
                 </span>
                 <span className="text-emerald-400 font-bold tabular-nums">₹{wallet.realBalance}</span>
+              </button>
+
+              <button
+                onClick={() => setActiveModal('history')}
+                className="w-full py-2.5 px-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-xs font-semibold text-neutral-200 flex items-center justify-between transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-amber-400" />
+                  Passbook &amp; History
+                </span>
+                <span className="text-neutral-400 text-[10px]">Ledger &amp; UTR</span>
               </button>
 
               <button
@@ -4045,6 +4093,377 @@ export default function App() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* --- INSUFFICIENT BALANCE NOTIFICATION MODAL --- */}
+      {insufficientBalanceNotice && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="max-w-sm w-full bg-neutral-900 border border-amber-500/40 rounded-3xl p-6 text-center space-y-4 shadow-2xl relative">
+            <div className="w-14 h-14 mx-auto rounded-full bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-lg">
+              <Coins className="w-7 h-7" />
+            </div>
+
+            <div className="space-y-1">
+              <h3 className="font-display font-black text-xl text-white">Insufficient Real Balance</h3>
+              <p className="text-xs text-neutral-300">
+                You need ₹{insufficientBalanceNotice.required} to play this match, but your current balance is ₹{insufficientBalanceNotice.available}.
+              </p>
+            </div>
+
+            <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-3.5 text-xs text-left space-y-2">
+              <div className="flex justify-between items-center text-neutral-400">
+                <span>Required Entry Fee</span>
+                <span className="font-bold text-white">₹{insufficientBalanceNotice.required}</span>
+              </div>
+              <div className="flex justify-between items-center text-neutral-400">
+                <span>Available Real Balance</span>
+                <span className="font-bold text-amber-400">₹{insufficientBalanceNotice.available}</span>
+              </div>
+              <div className="border-t border-neutral-800 pt-1.5 flex justify-between items-center text-red-400 font-bold">
+                <span>Shortfall Needed</span>
+                <span>₹{insufficientBalanceNotice.required - insufficientBalanceNotice.available}</span>
+              </div>
+            </div>
+
+            <div className="space-y-2 pt-1">
+              <button
+                onClick={() => {
+                  const shortfall = Math.max(50, insufficientBalanceNotice.required - insufficientBalanceNotice.available);
+                  setInsufficientBalanceNotice(null);
+                  setDepositPaymentAmount(shortfall);
+                }}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-bold text-xs transition-all shadow-lg shadow-emerald-600/25 active:scale-95 flex items-center justify-center gap-1.5"
+              >
+                <PlusCircle className="w-4 h-4" />
+                Add Cash & Deposit Now
+              </button>
+              <button
+                onClick={() => setInsufficientBalanceNotice(null)}
+                className="w-full py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white font-bold text-xs transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- PLAYER ACCOUNT PASSBOOK & HISTORY MODAL (RULE: PERMANENT ZERO-HARDCODING) --- */}
+      {activeModal === 'history' && (() => {
+        const playerDeposits = getPlayerDepositHistory(playerName);
+        const playerWithdrawals = getPlayerWithdrawalHistory(playerName);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
+            <div className="max-w-xl w-full max-h-[90vh] bg-neutral-900 border border-neutral-800 rounded-3xl p-5 flex flex-col shadow-2xl relative overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-neutral-800 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                    <History className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-display font-black text-lg text-white">Player Passbook & Ledger</h3>
+                    <p className="text-[11px] text-neutral-400">
+                      Permanent records for <span className="text-amber-400 font-bold">{playerName}</span> • Never resets
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setActiveModal(null)}
+                  className="w-8 h-8 rounded-full bg-neutral-800 hover:bg-neutral-700 flex items-center justify-center text-neutral-400 hover:text-white transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Player Permanent Stats Card */}
+              <div className="mt-3 p-3.5 bg-neutral-950/80 border border-neutral-800/80 rounded-2xl shrink-0">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
+                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Real Balance</span>
+                    <span className="text-base font-black text-emerald-400">₹{wallet.realBalance.toLocaleString()}</span>
+                  </div>
+                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
+                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Matches Played</span>
+                    <span className="text-base font-black text-white">{wallet.matchesPlayed}</span>
+                  </div>
+                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
+                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Matches Won</span>
+                    <span className="text-base font-black text-amber-400">{wallet.matchesWon}</span>
+                  </div>
+                  <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800/50">
+                    <span className="text-[10px] text-neutral-400 uppercase font-semibold block">Total Won</span>
+                    <span className="text-base font-black text-yellow-400">₹{wallet.totalWon.toLocaleString()}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Navigation Tabs */}
+              <div className="flex gap-2 mt-3 p-1 bg-neutral-950 border border-neutral-800 rounded-xl shrink-0">
+                <button
+                  onClick={() => setHistoryTab('transactions')}
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
+                    historyTab === 'transactions'
+                      ? 'bg-amber-500 text-neutral-950 shadow-md'
+                      : 'text-neutral-400 hover:text-white'
+                  }`}
+                >
+                  All Transactions ({wallet.transactions.length})
+                </button>
+                <button
+                  onClick={() => setHistoryTab('deposits')}
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
+                    historyTab === 'deposits'
+                      ? 'bg-emerald-500 text-white shadow-md'
+                      : 'text-neutral-400 hover:text-white'
+                  }`}
+                >
+                  Deposits / UTR ({playerDeposits.length})
+                </button>
+                <button
+                  onClick={() => setHistoryTab('withdrawals')}
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-bold transition-all ${
+                    historyTab === 'withdrawals'
+                      ? 'bg-blue-500 text-white shadow-md'
+                      : 'text-neutral-400 hover:text-white'
+                  }`}
+                >
+                  Withdrawals ({playerWithdrawals.length})
+                </button>
+              </div>
+
+              {/* Tab Contents (Scrollable) */}
+              <div className="mt-3 flex-1 overflow-y-auto space-y-2 pr-1 min-h-[220px]">
+                {/* TAB 1: ALL TRANSACTIONS */}
+                {historyTab === 'transactions' && (
+                  wallet.transactions.length === 0 ? (
+                    <div className="h-44 flex flex-col items-center justify-center text-center p-4 text-neutral-500">
+                      <History className="w-8 h-8 stroke-1 mb-2 opacity-50" />
+                      <p className="text-xs font-semibold text-neutral-400">No transactions recorded yet</p>
+                      <p className="text-[11px] text-neutral-500">All your deposits, wagers, winnings, and payouts will be listed here permanently.</p>
+                    </div>
+                  ) : (
+                    wallet.transactions.map((txn) => {
+                      const isCredit = txn.type === 'deposit' || txn.type === 'win';
+                      return (
+                        <div
+                          key={txn.id}
+                          className="p-3 bg-neutral-950/70 border border-neutral-800/80 rounded-xl flex items-center justify-between gap-3 text-xs"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                              isCredit ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'
+                            }`}>
+                              {isCredit ? <ArrowDownLeft className="w-4 h-4" /> : <ArrowUpRight className="w-4 h-4" />}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-bold text-white truncate">{txn.description}</p>
+                              <div className="flex items-center gap-2 text-[10px] text-neutral-400">
+                                <span>{new Date(txn.timestamp).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>
+                                <span>•</span>
+                                <span className="font-mono text-neutral-500">{txn.id}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="text-right shrink-0">
+                            <span className={`font-black text-sm block ${
+                              isCredit ? 'text-emerald-400' : 'text-rose-400'
+                            }`}>
+                              {isCredit ? `+₹${txn.amount}` : `-₹${txn.amount}`}
+                            </span>
+                            <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${
+                              txn.status === 'success'
+                                ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-500/30'
+                                : txn.status === 'pending'
+                                ? 'bg-amber-950/60 text-amber-400 border border-amber-500/30'
+                                : 'bg-red-950/60 text-red-400 border border-red-500/30'
+                            }`}>
+                              {txn.status}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )
+                )}
+
+                {/* TAB 2: DEPOSITS & UTR VERIFICATIONS */}
+                {historyTab === 'deposits' && (
+                  playerDeposits.length === 0 ? (
+                    <div className="h-44 flex flex-col items-center justify-center text-center p-4 text-neutral-500">
+                      <CreditCard className="w-8 h-8 stroke-1 mb-2 opacity-50" />
+                      <p className="text-xs font-semibold text-neutral-400">No deposit requests submitted yet</p>
+                      <button
+                        onClick={() => {
+                          setActiveModal(null);
+                          setDepositPaymentAmount(100);
+                        }}
+                        className="mt-3 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs"
+                      >
+                        Add Cash to Wallet
+                      </button>
+                    </div>
+                  ) : (
+                    playerDeposits.map((dep) => (
+                      <div
+                        key={dep.id}
+                        className="p-3 bg-neutral-950/70 border border-neutral-800/80 rounded-xl space-y-2 text-xs"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-black text-base text-emerald-400">₹{dep.amount}</span>
+                              <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border ${
+                                dep.status === 'completed'
+                                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/40'
+                                  : dep.status === 'pending'
+                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/40 animate-pulse'
+                                  : 'bg-rose-500/10 text-rose-300 border-rose-500/40'
+                              }`}>
+                                {dep.status === 'completed' ? 'Approved & Credited' : dep.status === 'pending' ? 'Verification Pending' : 'Rejected'}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-neutral-400 mt-0.5 font-mono">
+                              UTR: <span className="text-white font-bold">{dep.utr}</span>
+                            </p>
+                            <p className="text-[10px] text-neutral-500">
+                              {new Date(dep.timestamp).toLocaleString()} • Ref: {dep.id}
+                            </p>
+                            {dep.rejectionReason && (
+                              <p className="text-[11px] text-rose-400 mt-1">
+                                Reason: {dep.rejectionReason}
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Payment Screenshot Thumbnail & Lightbox Button */}
+                          {dep.screenshotUrl ? (
+                            <div className="shrink-0 flex flex-col items-center gap-1">
+                              <button
+                                onClick={() => setHistoryScreenshotPreview(dep.screenshotUrl)}
+                                className="group relative w-16 h-16 rounded-lg overflow-hidden border border-neutral-700 hover:border-amber-400 transition-all shadow-md cursor-pointer block"
+                                title="Click to view full payment screenshot"
+                              >
+                                <img
+                                  src={dep.screenshotUrl}
+                                  alt="Payment proof"
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                                />
+                                <div className="absolute inset-0 bg-black/40 group-hover:bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <Eye className="w-4 h-4 text-white" />
+                                </div>
+                              </button>
+                              <button
+                                onClick={() => setHistoryScreenshotPreview(dep.screenshotUrl)}
+                                className="text-[10px] text-amber-400 hover:underline font-semibold flex items-center gap-0.5"
+                              >
+                                <Eye className="w-3 h-3" /> View Proof
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-neutral-500 italic">No screenshot</span>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )
+                )}
+
+                {/* TAB 3: WITHDRAWAL REQUESTS */}
+                {historyTab === 'withdrawals' && (
+                  playerWithdrawals.length === 0 ? (
+                    <div className="h-44 flex flex-col items-center justify-center text-center p-4 text-neutral-500">
+                      <Building className="w-8 h-8 stroke-1 mb-2 opacity-50" />
+                      <p className="text-xs font-semibold text-neutral-400">No withdrawal requests found</p>
+                      <p className="text-[11px] text-neutral-500">When you request cash withdrawals to your UPI, they appear here.</p>
+                    </div>
+                  ) : (
+                    playerWithdrawals.map((req) => (
+                      <div
+                        key={req.id}
+                        className="p-3 bg-neutral-950/70 border border-neutral-800/80 rounded-xl flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-black text-base text-white">₹{req.amount}</span>
+                            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border ${
+                              req.status === 'completed'
+                                ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/40'
+                                : req.status === 'pending'
+                                ? 'bg-amber-500/10 text-amber-300 border-amber-500/40'
+                                : 'bg-rose-500/10 text-rose-300 border-rose-500/40'
+                            }`}>
+                              {req.status === 'completed' ? 'Processed' : req.status === 'pending' ? 'Under Review' : 'Rejected'}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-neutral-400 mt-0.5">
+                            To UPI: <span className="text-amber-400 font-mono font-bold">{req.playerUpi}</span>
+                          </p>
+                          <p className="text-[10px] text-neutral-500">
+                            {new Date(req.timestamp).toLocaleString()} • Ref: {req.id}
+                          </p>
+                          {req.rejectionReason && (
+                            <p className="text-[11px] text-rose-400 mt-1">
+                              Reason: {req.rejectionReason} (Amount refunded)
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="mt-3 pt-3 border-t border-neutral-800 flex items-center justify-between text-xs text-neutral-400 shrink-0">
+                <span className="text-[11px]">Secure Carrom Royal Database • 100% Persisted</span>
+                <button
+                  onClick={() => setActiveModal(null)}
+                  className="px-4 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-xs"
+                >
+                  Close Passbook
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* --- PAYMENT SCREENSHOT LIGHTBOX MODAL --- */}
+      {historyScreenshotPreview && (
+        <div className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-neutral-900 border border-neutral-700 rounded-3xl p-4 space-y-3 shadow-2xl relative">
+            <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
+              <h4 className="font-bold text-sm text-white flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                Payment Proof Screenshot
+              </h4>
+              <button
+                onClick={() => setHistoryScreenshotPreview(null)}
+                className="w-7 h-7 rounded-full bg-neutral-800 hover:bg-neutral-700 flex items-center justify-center text-neutral-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="max-h-[70vh] overflow-auto rounded-xl bg-black border border-neutral-800 flex items-center justify-center p-1">
+              <img
+                src={historyScreenshotPreview}
+                alt="Payment proof screenshot"
+                className="max-h-[68vh] w-auto object-contain rounded-lg shadow-lg"
+              />
+            </div>
+            <div className="flex justify-end pt-1">
+              <button
+                onClick={() => setHistoryScreenshotPreview(null)}
+                className="px-4 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-xs"
+              >
+                Close Preview
+              </button>
+            </div>
           </div>
         </div>
       )}

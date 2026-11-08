@@ -24,7 +24,8 @@ import {
   Clock,
   ChevronRight,
   TrendingUp,
-  Trash2
+  Trash2,
+  X
 } from 'lucide-react';
 import {
   AdminDepositConfig,
@@ -94,6 +95,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
   const [depositFilter, setDepositFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('pending');
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [selectedDepositScreenshot, setSelectedDepositScreenshot] = useState<DepositRequest | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Subscribe to real-time events across tabs
@@ -722,6 +724,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
                               </button>
                             </div>
                           </div>
+
+                          {/* Attached Payment Screenshot */}
+                          <div className="flex items-center gap-2 pt-1.5">
+                            <span className="text-xs text-neutral-400">Receipt:</span>
+                            {item.screenshotUrl ? (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedDepositScreenshot(item)}
+                                  className="w-11 h-11 rounded-lg overflow-hidden border-2 border-amber-500/60 bg-neutral-900 relative group cursor-pointer shrink-0 shadow"
+                                  title="Click to view full screenshot"
+                                >
+                                  <img
+                                    src={item.screenshotUrl}
+                                    alt="Payment Receipt"
+                                    className="w-full h-full object-cover group-hover:scale-110 transition-transform"
+                                  />
+                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                    <Eye className="w-3.5 h-3.5 text-white" />
+                                  </div>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedDepositScreenshot(item)}
+                                  className="px-2.5 py-1 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 hover:text-amber-300 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>View Screenshot</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-neutral-500 italic">No receipt attached</span>
+                            )}
+                          </div>
                         </div>
 
                         {/* Actions */}
@@ -1046,6 +1082,143 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
           )}
         </main>
       </div>
+
+      {/* ADMIN LIGHTBOX MODAL FOR VERIFYING PAYMENT SCREENSHOT */}
+      {selectedDepositScreenshot && (
+        <div
+          onClick={() => setSelectedDepositScreenshot(null)}
+          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-2xl w-full bg-neutral-950 border border-neutral-800 rounded-3xl p-6 shadow-2xl space-y-4 flex flex-col max-h-[92vh]"
+          >
+            {/* Modal Header */}
+            <div className="flex items-start justify-between pb-3 border-b border-neutral-800">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs text-neutral-400 font-semibold">{selectedDepositScreenshot.id}</span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                      selectedDepositScreenshot.status === 'completed'
+                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                        : selectedDepositScreenshot.status === 'rejected'
+                        ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
+                        : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                    }`}
+                  >
+                    {selectedDepositScreenshot.status}
+                  </span>
+                </div>
+                <h3 className="font-display font-bold text-lg text-white mt-1">
+                  Player: <span className="text-amber-300">{selectedDepositScreenshot.playerName}</span> ·{' '}
+                  <span className="text-emerald-400 font-black">₹{selectedDepositScreenshot.amount}</span>
+                </h3>
+                <div className="flex flex-wrap items-center gap-2 mt-1 text-xs text-neutral-400">
+                  <span className="flex items-center gap-1 font-mono text-white bg-neutral-900 px-2.5 py-0.5 rounded-lg border border-neutral-800">
+                    UTR: {selectedDepositScreenshot.utr}
+                  </span>
+                  <span>·</span>
+                  <span className="flex items-center gap-1 text-neutral-400">
+                    <Clock className="w-3 h-3" />
+                    {new Date(selectedDepositScreenshot.timestamp).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedDepositScreenshot(null)}
+                className="p-1.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Screenshot Display Box */}
+            <div className="flex-1 overflow-auto rounded-2xl bg-neutral-900/80 border border-neutral-800 p-2 flex items-center justify-center min-h-[320px]">
+              {selectedDepositScreenshot.screenshotUrl ? (
+                <img
+                  src={selectedDepositScreenshot.screenshotUrl}
+                  alt="Player Payment Receipt Screenshot"
+                  className="max-h-[58vh] w-auto max-w-full object-contain rounded-xl shadow-xl"
+                />
+              ) : (
+                <div className="text-center text-neutral-500 py-12">
+                  <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">No screenshot was uploaded with this deposit request.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-neutral-800">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleCopy(selectedDepositScreenshot.utr, 'modal_utr')}
+                  className="px-3 py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
+                >
+                  {copiedId === 'modal_utr' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-emerald-400">Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy UTR</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                {selectedDepositScreenshot.status === 'pending' ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleProcessDeposit(selectedDepositScreenshot.id, 'rejected');
+                        setSelectedDepositScreenshot(null);
+                      }}
+                      className="flex-1 sm:flex-initial px-4 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <XCircle className="w-4 h-4" />
+                      Reject Deposit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleProcessDeposit(selectedDepositScreenshot.id, 'completed');
+                        setSelectedDepositScreenshot(null);
+                      }}
+                      className="flex-1 sm:flex-initial px-5 py-2 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/20 transition-all"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      Approve & Credit ₹{selectedDepositScreenshot.amount}
+                    </button>
+                  </>
+                ) : (
+                  <div className="text-xs text-neutral-400 font-semibold flex items-center gap-1.5">
+                    {selectedDepositScreenshot.status === 'completed' ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <span className="text-emerald-400">Approved & Credited</span>
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="w-4 h-4 text-rose-400" />
+                        <span className="text-rose-400">Rejected</span>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
