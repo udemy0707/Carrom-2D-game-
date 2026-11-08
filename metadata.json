@@ -1,0 +1,6 @@
+{
+  "name": "Carrom Royal: 2D Board Game & Economy",
+  "description": "A premier 2D Carrom board game featuring realistic physics, Web Audio clacks, smart AI matchmaking, and an integrated platform economy with wallet, commission rake, and bonus wagering.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
