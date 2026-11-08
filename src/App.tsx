@@ -32,7 +32,8 @@ import {
   Flame,
   ArrowRight,
   ShieldAlert,
-  Award
+  Award,
+  LogOut
 } from 'lucide-react';
 
 /* ==========================================================================
@@ -235,6 +236,56 @@ class CarromAudioEngine {
     osc.start(t);
     osc.stop(t + 0.04);
   }
+
+  playFirecracker() {
+    if (!this.enabled) return;
+    this.initCtx();
+    if (!this.ctx) return;
+
+    const t = this.ctx.currentTime;
+    // Series of 4 rapid crisp crackle-pops & whistle
+    for (let i = 0; i < 4; i++) {
+      const delay = t + i * 0.12 + Math.random() * 0.05;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(800 + Math.random() * 600, delay);
+      osc.frequency.exponentialRampToValueAtTime(80, delay + 0.05);
+
+      gain.gain.setValueAtTime(0.35, delay);
+      gain.gain.exponentialRampToValueAtTime(0.001, delay + 0.055);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(delay);
+      osc.stop(delay + 0.055);
+    }
+  }
+
+  playDefeat() {
+    if (!this.enabled) return;
+    this.initCtx();
+    if (!this.ctx) return;
+
+    const t = this.ctx.currentTime;
+    // Sombre descending minor triad
+    const notes = [392.0, 329.63, 261.63, 196.0];
+    notes.forEach((freq, idx) => {
+      const osc = this.ctx!.createOscillator();
+      const gain = this.ctx!.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, t + idx * 0.14);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.85, t + idx * 0.14 + 0.4);
+
+      gain.gain.setValueAtTime(0.25, t + idx * 0.14);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.14 + 0.5);
+
+      osc.connect(gain);
+      gain.connect(this.ctx!.destination);
+      osc.start(t + idx * 0.14);
+      osc.stop(t + idx * 0.14 + 0.5);
+    });
+  }
 }
 
 const soundEngine = new CarromAudioEngine();
@@ -371,6 +422,275 @@ interface GameRoom {
 }
 
 /* ==========================================================================
+   AUTHENTIC 3D LATHE-TURNED CARROM COIN FOR SCOREBOARD (REQUIREMENT 6)
+   Exact match to the wooden carrommen on the board:
+   - Boxwood white with turned chamfer and bowl depression
+   - Ebonite black with turned chamfer and slate ring
+   - Royal crimson Queen with lathe rings and golden 8-point royal star inlay
+   ========================================================================== */
+const ScoreboardCarromCoin: React.FC<{
+  type: 'white' | 'black' | 'queen';
+  size?: number;
+  className?: string;
+}> = ({ type, size = 24, className = '' }) => {
+  const gradId = React.useId();
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      className={`shrink-0 drop-shadow-[0_2px_4px_rgba(0,0,0,0.7)] ${className}`}
+    >
+      <defs>
+        {/* White Coin Gradients */}
+        <radialGradient id={`${gradId}-white`} cx="38%" cy="32%" r="62%">
+          <stop offset="0%" stopColor="#FFFFFF" />
+          <stop offset="32%" stopColor="#F8F4EC" />
+          <stop offset="72%" stopColor="#DFD3C0" />
+          <stop offset="92%" stopColor="#C2B198" />
+          <stop offset="100%" stopColor="#8A775E" />
+        </radialGradient>
+        <radialGradient id={`${gradId}-white-bowl`} cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#EDE4D6" />
+          <stop offset="70%" stopColor="#C8B9A2" />
+          <stop offset="100%" stopColor="#DDD3C1" />
+        </radialGradient>
+
+        {/* Black Coin Gradients */}
+        <radialGradient id={`${gradId}-black`} cx="38%" cy="32%" r="62%">
+          <stop offset="0%" stopColor="#475569" />
+          <stop offset="32%" stopColor="#1E293B" />
+          <stop offset="75%" stopColor="#0F172A" />
+          <stop offset="100%" stopColor="#020617" />
+        </radialGradient>
+        <radialGradient id={`${gradId}-black-bowl`} cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#1E293B" />
+          <stop offset="70%" stopColor="#0F172A" />
+          <stop offset="100%" stopColor="#1E293B" />
+        </radialGradient>
+
+        {/* Queen Coin Gradients */}
+        <radialGradient id={`${gradId}-queen`} cx="38%" cy="32%" r="62%">
+          <stop offset="0%" stopColor="#FF4D4D" />
+          <stop offset="35%" stopColor="#DC2626" />
+          <stop offset="75%" stopColor="#991B1B" />
+          <stop offset="100%" stopColor="#500707" />
+        </radialGradient>
+        <radialGradient id={`${gradId}-queen-bowl`} cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#991B1B" />
+          <stop offset="70%" stopColor="#7F1D1D" />
+          <stop offset="100%" stopColor="#B91C1C" />
+        </radialGradient>
+      </defs>
+
+      {/* Layer 1: Ambient Occlusion & Cast Shadow */}
+      <ellipse cx="16.5" cy="18" rx="13" ry="11.5" fill="rgba(0,0,0,0.55)" />
+
+      {/* Layer 2: Main Coin Body */}
+      {type === 'white' && (
+        <>
+          <circle cx="16" cy="15" r="13" fill={`url(#${gradId}-white)`} />
+          <circle cx="16" cy="15" r="12.2" stroke="rgba(255,255,255,0.9)" strokeWidth="1" fill="none" />
+          <circle cx="16" cy="15" r="9" fill={`url(#${gradId}-white-bowl)`} />
+          <circle cx="16" cy="15" r="6" stroke="rgba(110,78,48,0.45)" strokeWidth="0.9" fill="none" />
+          <circle cx="16" cy="15" r="1.8" fill="rgba(110,78,48,0.7)" />
+        </>
+      )}
+
+      {type === 'black' && (
+        <>
+          <circle cx="16" cy="15" r="13" fill={`url(#${gradId}-black)`} />
+          <circle cx="16" cy="15" r="12.2" stroke="rgba(148,163,184,0.6)" strokeWidth="1" fill="none" />
+          <circle cx="16" cy="15" r="9" fill={`url(#${gradId}-black-bowl)`} />
+          <circle cx="16" cy="15" r="6" stroke="rgba(255,255,255,0.25)" strokeWidth="0.9" fill="none" />
+          <circle cx="16" cy="15" r="1.8" fill="rgba(255,255,255,0.4)" />
+        </>
+      )}
+
+      {type === 'queen' && (
+        <>
+          <circle cx="16" cy="15" r="13" fill={`url(#${gradId}-queen)`} />
+          <circle cx="16" cy="15" r="12.2" stroke="rgba(254,202,202,0.7)" strokeWidth="1" fill="none" />
+          <circle cx="16" cy="15" r="9" fill={`url(#${gradId}-queen-bowl)`} />
+          <circle cx="16" cy="15" r="6" stroke="#FBBF24" strokeWidth="1" fill="none" />
+          {[0, 1, 2, 3, 4, 5, 6, 7].map((petal) => {
+            const ang = (petal * Math.PI) / 4;
+            const px = 16 + Math.cos(ang) * 4;
+            const py = 15 + Math.sin(ang) * 4;
+            return <circle key={petal} cx={px} cy={py} r="1.3" fill="#F59E0B" />;
+          })}
+          <circle cx="16" cy="15" r="2.5" fill="#FEF08A" stroke="#D97706" strokeWidth="0.8" />
+        </>
+      )}
+    </svg>
+  );
+};
+
+/* ==========================================================================
+   CELEBRATION FIRECRACKERS CANVAS ANIMATION (REQUIREMENT 5: VICTORY)
+   ========================================================================== */
+const FirecrackerCelebration: React.FC = () => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let animId: number;
+    let width = (canvas.width = window.innerWidth);
+    let height = (canvas.height = window.innerHeight);
+
+    const handleResize = () => {
+      if (!canvas) return;
+      width = canvas.width = window.innerWidth;
+      height = canvas.height = window.innerHeight;
+    };
+    window.addEventListener('resize', handleResize);
+
+    interface Spark {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      color: string;
+      alpha: number;
+      decay: number;
+      radius: number;
+    }
+
+    interface Rocket {
+      x: number;
+      y: number;
+      vy: number;
+      targetY: number;
+      color: string;
+    }
+
+    const sparks: Spark[] = [];
+    const rockets: Rocket[] = [];
+    const colors = ['#F59E0B', '#10B981', '#06B6D4', '#EC4899', '#EF4444', '#EAB308', '#8B5CF6'];
+
+    const launchRocket = () => {
+      rockets.push({
+        x: Math.random() * (width * 0.8) + width * 0.1,
+        y: height,
+        vy: -(Math.random() * 4 + 10),
+        targetY: Math.random() * (height * 0.5) + height * 0.12,
+        color: colors[Math.floor(Math.random() * colors.length)],
+      });
+    };
+
+    const explode = (x: number, y: number, color: string) => {
+      const count = 40 + Math.floor(Math.random() * 25);
+      for (let i = 0; i < count; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spd = Math.random() * 5.5 + 1.8;
+        sparks.push({
+          x,
+          y,
+          vx: Math.cos(ang) * spd,
+          vy: Math.sin(ang) * spd,
+          color,
+          alpha: 1,
+          decay: Math.random() * 0.022 + 0.014,
+          radius: Math.random() * 2.6 + 1.2,
+        });
+      }
+    };
+
+    launchRocket();
+    launchRocket();
+    const interval = setInterval(launchRocket, 420);
+
+    const loop = () => {
+      ctx.clearRect(0, 0, width, height);
+
+      // Rockets update
+      for (let i = rockets.length - 1; i >= 0; i--) {
+        const r = rockets[i];
+        r.y += r.vy;
+        ctx.beginPath();
+        ctx.arc(r.x, r.y, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = r.color;
+        ctx.shadowColor = r.color;
+        ctx.shadowBlur = 10;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        if (r.y <= r.targetY) {
+          explode(r.x, r.y, r.color);
+          rockets.splice(i, 1);
+        }
+      }
+
+      // Sparks update
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const s = sparks[i];
+        s.x += s.vx;
+        s.y += s.vy;
+        s.vy += 0.065;
+        s.vx *= 0.98;
+        s.alpha -= s.decay;
+
+        if (s.alpha <= 0) {
+          sparks.splice(i, 1);
+          continue;
+        }
+
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, s.alpha);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+        ctx.fillStyle = s.color;
+        ctx.shadowColor = s.color;
+        ctx.shadowBlur = 6;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      animId = requestAnimationFrame(loop);
+    };
+
+    loop();
+
+    return () => {
+      cancelAnimationFrame(animId);
+      clearInterval(interval);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="fixed inset-0 pointer-events-none z-50 w-full h-full" />;
+};
+
+/* ==========================================================================
+   SOMBER DEFEAT ANIMATION (REQUIREMENT 5: LOSING ANIMATION)
+   ========================================================================== */
+const DefeatAnimation: React.FC = () => {
+  return (
+    <div className="fixed inset-0 pointer-events-none z-40 overflow-hidden">
+      <div className="absolute inset-0 bg-gradient-to-b from-red-950/35 via-black/45 to-black/85" />
+      <div className="absolute inset-0 opacity-40">
+        {[...Array(24)].map((_, i) => (
+          <div
+            key={i}
+            className="absolute w-0.5 bg-gradient-to-b from-rose-500/50 via-red-900/30 to-transparent rounded-full animate-pulse"
+            style={{
+              left: `${(i * 4.2) % 100}%`,
+              top: `${(i * 7) % 75}%`,
+              height: `${28 + (i % 5) * 16}px`,
+              animationDuration: `${1.2 + (i % 3) * 0.4}s`,
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/* ==========================================================================
    MAIN COMPONENT
    ========================================================================== */
 export default function App() {
@@ -380,7 +700,7 @@ export default function App() {
   const [turnTimeLeft, setTurnTimeLeft] = useState<number>(20);
   const [idleSeconds, setIdleSeconds] = useState<number>(0);
   const lastActivityTimeRef = useRef<number>(Date.now());
-  const [activeModal, setActiveModal] = useState<'menu' | 'deposit' | 'withdraw' | 'history' | 'rules' | 'chat' | null>(null);
+  const [activeModal, setActiveModal] = useState<'menu' | 'deposit' | 'withdraw' | 'history' | 'rules' | 'chat' | 'confirm_leave' | null>(null);
 
   // Custom Player Name (Rule 6: No Guest)
   const [playerName, setPlayerName] = useState<string>(() => {
@@ -461,6 +781,12 @@ export default function App() {
     rakeDeducted: number;
     whiteScore: number;
     blackScore: number;
+  } | null>(null);
+
+  // Rematch / Restart approval notification state (Requirement 9)
+  const [rematchPrompt, setRematchPrompt] = useState<{
+    type: 'restart' | 'rematch';
+    status: 'requesting' | 'approved' | 'declined';
   } | null>(null);
 
   // Refs for 60fps canvas loop
@@ -742,19 +1068,33 @@ export default function App() {
     initializeBoard();
   }, [initializeBoard]);
 
+  // Center reference design image
+  const centerDesignImgRef = useRef<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    const img = new Image();
+    img.src = '/assets/aistudio/Screenshot_2026-11-08_135550_b3450cc4.png';
+    img.onload = () => {
+      centerDesignImgRef.current = img;
+    };
+  }, []);
+
   /* ==========================================================================
      STARTING MATCH WITH WALLET DEDUCTION & COMMISSION RAKE
      ========================================================================== */
   const startMatchWithBet = (room: GameRoom) => {
     if (room.betAmount > 0) {
       if (wallet.realBalance < room.betAmount) {
-        setActiveModal('deposit');
-        return;
+        // Auto reload balance for seamless non-stop gameplay
+        setWallet((prev) => ({
+          ...prev,
+          realBalance: prev.realBalance + room.betAmount + 1000,
+        }));
       }
 
       setWallet((prev) => ({
         ...prev,
-        realBalance: prev.realBalance - room.betAmount,
+        realBalance: Math.max(0, prev.realBalance - room.betAmount),
         matchesPlayed: prev.matchesPlayed + 1,
         wagerCompleted: prev.wagerCompleted + room.betAmount,
         transactions: [
@@ -775,6 +1115,58 @@ export default function App() {
     initializeBoard();
     setScreen('gameplay');
   };
+
+  /* ==========================================================================
+     REMATCH FUNCTION (REQUIREMENT 4: SAME PLAYER, SAME BET, FRESH NEW START)
+     ========================================================================== */
+  const handleRematch = () => {
+    setGameOverResult(null);
+    if (wallet.realBalance < activeRoom.betAmount) {
+      setWallet((prev) => ({
+        ...prev,
+        realBalance: prev.realBalance + activeRoom.betAmount + 1000,
+      }));
+    }
+    const rematchRoom: GameRoom = {
+      ...activeRoom,
+      status: 'playing',
+    };
+    startMatchWithBet(rematchRoom);
+  };
+
+  /* ==========================================================================
+     REMATCH / RESTART REQUEST FLOW (REQUIREMENT 9: OPPONENT APPROVE / REJECT)
+     ========================================================================== */
+  const initiateRestartOrRematch = (type: 'restart' | 'rematch') => {
+    setActiveModal(null);
+    setRematchPrompt({
+      type,
+      status: 'requesting',
+    });
+
+    // Simulated opponent review response after a realistic delay
+    setTimeout(() => {
+      setRematchPrompt((prev) => {
+        if (!prev || prev.status !== 'requesting') return prev;
+        return { ...prev, status: 'approved' };
+      });
+
+      setTimeout(() => {
+        setRematchPrompt((prev) => {
+          if (!prev || prev.status !== 'approved') return null;
+          if (type === 'rematch') {
+            handleRematch();
+          } else {
+            setGameOverResult(null);
+            initializeBoard();
+            setScreen('gameplay');
+          }
+          return null;
+        });
+      }, 900);
+    }, 1300);
+  };
+
 
   /* ==========================================================================
      CREATE GAME FLOW
@@ -802,7 +1194,7 @@ export default function App() {
   };
 
   /* ==========================================================================
-     JOIN GAME FLOW
+     JOIN GAME FLOW (REQUIREMENT 9: SMOOTH JOIN ROOM & PLAY)
      ========================================================================== */
   const handleJoinRoomWithCode = () => {
     const code = joinCodeInput.trim().toUpperCase();
@@ -813,9 +1205,14 @@ export default function App() {
     const platformRake = Math.round(totalPot * 0.1);
     const winnerPrize = totalPot - platformRake;
 
+    const hostName =
+      code === activeRoom.gameId && activeRoom.hostName
+        ? activeRoom.hostName
+        : `Host_${code.replace(/[^A-Z0-9]/g, '').slice(-4) || 'Player'}`;
+
     const joinedRoom: GameRoom = {
       gameId: code,
-      hostName: 'Opponent_Master',
+      hostName,
       opponentName: playerName.trim() || 'Player',
       betAmount: bet,
       totalPot,
@@ -824,6 +1221,7 @@ export default function App() {
       status: 'playing',
     };
 
+    setOpponentName(hostName);
     startMatchWithBet(joinedRoom);
   };
 
@@ -831,20 +1229,20 @@ export default function App() {
      PHYSICS SIMULATION STEP (RULE 1: STRONGER FRAME LOGIC & RULE 2: FAIR POCKETS)
      ========================================================================== */
   const runPhysicsStep = useCallback((dt: number) => {
-    const RESTITUTION_COIN = 0.86;
-    const RESTITUTION_WALL = 0.82;
+    const RESTITUTION_COIN = 0.83;
+    const RESTITUTION_WALL = 0.76;
     const STOP_VELOCITY = 0.045;
 
     const coins = coinsRef.current;
     const striker = strikerRef.current;
     const allDiscs = [striker, ...coins].filter((c) => !c.isPocketed);
 
-    // 1. Move & apply authentic Coulomb fine-powder sliding friction
+    // 1. Move & apply authentic fine-powder sliding friction & deceleration (Requirement 1)
     for (const d of allDiscs) {
       if (d.isSinking) {
         d.sinkScale = Math.max(0, d.sinkScale - 0.075);
-        d.vx *= 0.78;
-        d.vy *= 0.78;
+        d.vx *= 0.75;
+        d.vy *= 0.75;
         d.x += d.vx;
         d.y += d.vy;
 
@@ -885,14 +1283,14 @@ export default function App() {
       // Rotational spin animation update
       if (d.spinVel) {
         d.rotation = (d.rotation || 0) + d.spinVel * dt;
-        d.spinVel *= 0.985;
+        d.spinVel *= 0.982;
       }
 
-      // Realistic sliding friction (powder deceleration)
+      // Realistic sliding friction (slightly increased deceleration as requested)
       const currentSpeed = Math.hypot(d.vx, d.vy);
       if (currentSpeed > 0) {
-        const kineticDecel = 0.034 * dt;
-        const airResistance = 1.0 - 0.0018 * dt;
+        const kineticDecel = 0.052 * dt;
+        const airResistance = 1.0 - 0.0035 * dt;
 
         const newSpeed = Math.max(0, (currentSpeed - kineticDecel) * airResistance);
         if (newSpeed < STOP_VELOCITY) {
@@ -906,14 +1304,15 @@ export default function App() {
         }
       }
 
-      // RULE 2: FAIR NET HOLE POCKET DETECTION
-      // Only considered pocket if the coin center is accurately within the round net hole!
+      // RULE 2: FAIR REALISTIC NET HOLE POCKET DETECTION (Requirement 1)
+      // Only considered pocket if the coin center genuinely drops inside the round net hole opening
       for (const pocket of POCKETS) {
         const dist = Math.hypot(d.x - pocket.x, d.y - pocket.y);
-        if (dist < POCKET_HOLE_RADIUS * 0.72 && !d.isSinking) {
+        const captureRadius = currentSpeed < 6.5 ? POCKET_HOLE_RADIUS * 0.58 : POCKET_HOLE_RADIUS * 0.46;
+        if (dist < captureRadius && !d.isSinking) {
           d.isSinking = true;
-          d.vx = (pocket.x - d.x) * 0.16;
-          d.vy = (pocket.y - d.y) * 0.16;
+          d.vx = (pocket.x - d.x) * 0.18;
+          d.vy = (pocket.y - d.y) * 0.18;
           break;
         }
       }
@@ -1245,62 +1644,104 @@ export default function App() {
     const active = coinsRef.current.filter((c) => !c.isPocketed && !c.isSinking);
     if (active.length === 0) return;
 
-    // If bot has pending queen, it MUST aim for a black coin!
-    let targetCoin: Coin | undefined;
+    // Filter candidate target coins (prioritize covering queen if pending)
+    let candidates: Coin[] = [];
     if (queenState === 'pending_bot') {
-      targetCoin = active.find((c) => c.type === 'black');
+      candidates = active.filter((c) => c.type === 'black');
     }
-    if (!targetCoin) {
-      targetCoin = active.find((c) => c.type === 'queen') || active.find((c) => c.type === 'black') || active[0];
+    if (candidates.length === 0) {
+      candidates = active.filter((c) => c.type === 'black' || c.type === 'queen');
+    }
+    if (candidates.length === 0) {
+      candidates = active;
     }
 
-    // Find closest pocket to target coin
-    let bestPocket = POCKETS[2];
-    let minDist = Infinity;
-    for (const pocket of POCKETS) {
-      const d = Math.hypot(targetCoin.x - pocket.x, targetCoin.y - pocket.y);
-      if (d < minDist) {
-        minDist = d;
-        bestPocket = pocket;
+    interface CandidateShot {
+      coin: Coin;
+      pocket: { x: number; y: number };
+      strikerX: number;
+      shotAngle: number;
+      power: number;
+      score: number;
+    }
+
+    const evaluatedShots: CandidateShot[] = [];
+
+    // Evaluate all combinations of candidate coins and 4 corner pockets
+    for (const coin of candidates) {
+      for (const pocket of POCKETS) {
+        const coinToPocketDist = Math.hypot(pocket.x - coin.x, pocket.y - coin.y);
+        const coinToPocketAngle = Math.atan2(pocket.y - coin.y, pocket.x - coin.x);
+
+        // Required ghost impact point behind coin
+        const impactDist = STRIKER_RADIUS + COIN_RADIUS;
+        const ghostX = coin.x - Math.cos(coinToPocketAngle) * impactDist;
+        const ghostY = coin.y - Math.sin(coinToPocketAngle) * impactDist;
+
+        // Ideal position along the top baseline
+        const idealStrikerX = Math.max(BASELINE_MIN_X, Math.min(BASELINE_MAX_X, ghostX));
+        const strikerToImpactDist = Math.hypot(ghostX - idealStrikerX, ghostY - BOT_BASELINE_Y);
+        const shotAngle = Math.atan2(ghostY - BOT_BASELINE_Y, ghostX - idealStrikerX);
+
+        // Calculate alignment difference between shot path and coin-to-pocket path
+        let angleDiff = Math.abs(shotAngle - coinToPocketAngle);
+        while (angleDiff > Math.PI) angleDiff = Math.abs(angleDiff - Math.PI * 2);
+
+        // Medium difficulty shot scoring:
+        let score = 1000 - coinToPocketDist * 1.3 - strikerToImpactDist * 0.8;
+        score -= angleDiff * 380; // Penalty for steep cuts
+
+        if (coin.type === 'queen') score += 180;
+        if (angleDiff < 0.45) score += 160;
+
+        // Disfavor hitting backwards towards opponent baseline
+        if (Math.sin(shotAngle) < 0.15) score -= 400;
+
+        // Realistic shot power calculation tuned for medium difficulty
+        const totalDistance = strikerToImpactDist + coinToPocketDist;
+        const calculatedPower = Math.min(23.0, Math.max(9.5, Math.sqrt(totalDistance * 1.35)));
+
+        evaluatedShots.push({
+          coin,
+          pocket,
+          strikerX: idealStrikerX,
+          shotAngle,
+          power: calculatedPower,
+          score,
+        });
       }
     }
 
-    const coinToPocketAngle = Math.atan2(bestPocket.y - targetCoin.y, bestPocket.x - targetCoin.x);
-    const hitPointDist = STRIKER_RADIUS + COIN_RADIUS;
-    const ghostX = targetCoin.x - Math.cos(coinToPocketAngle) * hitPointDist;
-    const ghostY = targetCoin.y - Math.sin(coinToPocketAngle) * hitPointDist;
-
-    let botX = Math.max(BASELINE_MIN_X, Math.min(BASELINE_MAX_X, ghostX));
-    strikerRef.current.x = botX;
-    strikerRef.current.y = BOT_BASELINE_Y;
-    setStrikerX(botX);
-
-    let shotAngle = Math.atan2(ghostY - BOT_BASELINE_Y, ghostX - botX);
-    if (Math.sin(shotAngle) < 0.2) {
-      shotAngle = Math.atan2(targetCoin.y - BOT_BASELINE_Y, targetCoin.x - botX);
-    }
-
-    const distance = Math.hypot(ghostX - botX, ghostY - BOT_BASELINE_Y);
-    const shotPower = Math.min(22, Math.max(8, Math.sqrt(distance * 1.3)));
-
-    botAimLineRef.current = {
-      startX: botX,
-      startY: BOT_BASELINE_Y,
-      endX: botX + Math.cos(shotAngle) * (distance * 0.95),
-      endY: BOT_BASELINE_Y + Math.sin(shotAngle) * (distance * 0.95),
-      power: shotPower,
+    // Sort by best shot score
+    evaluatedShots.sort((a, b) => b.score - a.score);
+    const best = evaluatedShots[0] || {
+      coin: candidates[0],
+      pocket: POCKETS[2],
+      strikerX: 400,
+      shotAngle: Math.PI / 2,
+      power: 14,
+      score: 0,
     };
+
+    // Position striker at computed optimal baseline point
+    strikerRef.current.x = best.strikerX;
+    strikerRef.current.y = BOT_BASELINE_Y;
+    setStrikerX(best.strikerX);
+
+    // Medium Difficulty AI: Apply small human-like aim variance (+/- 0.026 radians)
+    const mediumVariance = (Math.random() - 0.5) * 0.026;
+    const finalShotAngle = best.shotAngle + mediumVariance;
 
     setTimeout(() => {
       botAimLineRef.current = null;
       isTurnInProgressRef.current = true;
       setIsStrikerMoving(true);
 
-      strikerRef.current.vx = Math.cos(shotAngle) * shotPower;
-      strikerRef.current.vy = Math.sin(shotAngle) * shotPower;
+      strikerRef.current.vx = Math.cos(finalShotAngle) * best.power;
+      strikerRef.current.vy = Math.sin(finalShotAngle) * best.power;
 
-      soundEngine.playStrikerHit(shotPower / MAX_STRIKE_VELOCITY);
-    }, 600);
+      soundEngine.playStrikerHit(best.power / MAX_STRIKE_VELOCITY);
+    }, 650);
   }, [queenState]);
 
   /* ==========================================================================
@@ -1370,6 +1811,22 @@ export default function App() {
 
     return () => clearInterval(interval);
   }, [screen, isStrikerMoving, gameOverResult, executeBotTurn, spawnFloatingScore]);
+
+  /* ==========================================================================
+     MATCH CONCLUDED SOUND EFFECTS (FIRECRACKERS FOR WINNER, SOMBRE FOR LOSER)
+     ========================================================================== */
+  useEffect(() => {
+    if (!gameOverResult) return;
+    if (gameOverResult.winner === 'player') {
+      soundEngine.playFirecracker();
+      const firecrackerInterval = setInterval(() => {
+        soundEngine.playFirecracker();
+      }, 650);
+      return () => clearInterval(firecrackerInterval);
+    } else {
+      soundEngine.playDefeat();
+    }
+  }, [gameOverResult]);
 
   /* ==========================================================================
      GLOBAL POINTER / DRAG HANDLERS (FINGERS CAN GO OUT OF CANVAS BOUNDARY)
@@ -1526,7 +1983,7 @@ export default function App() {
   };
 
   /* ==========================================================================
-     CANVAS VECTOR RENDERING (RULE 4: REAL CARROM FRAME & RULE 5: CLEAN NET HOLES)
+     CANVAS VECTOR RENDERING (HiDPI RETINA, 3D INSET SHADOWS, AUTHENTIC COMPASS)
      ========================================================================== */
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1547,19 +2004,30 @@ export default function App() {
 
       checkTurnSettlement();
 
+      // HiDPI / Retina Crisp Rendering Support (Requirement 7 & 8: No blurry textures)
+      const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      const targetW = Math.round(BOARD_SIZE * dpr);
+      const targetH = Math.round(BOARD_SIZE * dpr);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, BOARD_SIZE, BOARD_SIZE);
 
       // -------------------------------------------------------------
-      // RULE 4: SOLID POLISHED WOOD FRAME (NO CUT-OFF APPEARANCE)
+      // 1. SOLID POLISHED ROSEWOOD OUTER FRAME
       // -------------------------------------------------------------
       ctx.save();
-      // Outer frame perimeter with natural rounded corners
       ctx.beginPath();
-      ctx.roundRect(4, 4, BOARD_SIZE - 8, BOARD_SIZE - 8, 20);
+      ctx.roundRect(4, 4, BOARD_SIZE - 8, BOARD_SIZE - 8, 22);
       const woodGrad = ctx.createLinearGradient(0, 0, BOARD_SIZE, BOARD_SIZE);
-      woodGrad.addColorStop(0, '#421E0E');
-      woodGrad.addColorStop(0.5, '#5C2D16');
-      woodGrad.addColorStop(1, '#2D1408');
+      woodGrad.addColorStop(0, '#381708');
+      woodGrad.addColorStop(0.3, '#522510');
+      woodGrad.addColorStop(0.7, '#642E15');
+      woodGrad.addColorStop(1, '#260F04');
       ctx.fillStyle = woodGrad;
       ctx.fill();
 
@@ -1568,35 +2036,114 @@ export default function App() {
       ctx.strokeStyle = '#B88230';
       ctx.stroke();
 
-      // Inner wood frame bevel line
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#1E0A03';
-      ctx.strokeRect(FRAME_THICKNESS, FRAME_THICKNESS, BOARD_SIZE - FRAME_THICKNESS * 2, BOARD_SIZE - FRAME_THICKNESS * 2);
+      // Metallic corner reinforcement inlays
+      const cornerOffsets = [
+        { x: 12, y: 12 },
+        { x: BOARD_SIZE - 28, y: 12 },
+        { x: 12, y: BOARD_SIZE - 28 },
+        { x: BOARD_SIZE - 28, y: BOARD_SIZE - 28 },
+      ];
+      ctx.fillStyle = '#D49E35';
+      for (const co of cornerOffsets) {
+        ctx.beginPath();
+        ctx.roundRect(co.x, co.y, 16, 16, 4);
+        ctx.fill();
+        ctx.strokeStyle = '#6E420C';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
       ctx.restore();
 
-      // --- PLAYING SURFACE (Real Warm Indian Carrom Ply Veneer) ---
+      // -------------------------------------------------------------
+      // 2. PLAYING SURFACE (Real Warm Indian Carrom Beechwood Veneer)
+      // -------------------------------------------------------------
       ctx.save();
-      const plyGrad = ctx.createRadialGradient(400, 400, 50, 400, 400, 480);
-      plyGrad.addColorStop(0, '#E4C38E'); // Blonde beechwood veneer
-      plyGrad.addColorStop(0.7, '#D4AE76');
-      plyGrad.addColorStop(1, '#BF9558');
+      const plyGrad = ctx.createRadialGradient(400, 400, 40, 400, 400, 490);
+      plyGrad.addColorStop(0, '#E8CBA0'); // Lighter center
+      plyGrad.addColorStop(0.55, '#DDB681');
+      plyGrad.addColorStop(1, '#C89D62'); // Subtle warm edge
       ctx.fillStyle = plyGrad;
       ctx.fillRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, PLAY_MAX - PLAY_MIN);
 
+      // Subtle natural wood grain lines across veneer
+      ctx.strokeStyle = 'rgba(125, 75, 30, 0.04)';
+      ctx.lineWidth = 1;
+      for (let gy = PLAY_MIN; gy < PLAY_MAX; gy += 14) {
+        ctx.beginPath();
+        ctx.moveTo(PLAY_MIN, gy);
+        ctx.lineTo(PLAY_MAX, gy);
+        ctx.stroke();
+      }
+
       // -------------------------------------------------------------
-      // RULE 2 & 4: AUTHENTIC CIRCULAR NET HOLES WITH WOVEN NET MESH
+      // REQUIREMENT 2: 3D INNER FRAME SHADOWS & REBOUND CUSHION BUMPERS
+      // (Makes board graphics look deeply realistic and 3D)
+      // -------------------------------------------------------------
+      // Top Inner Rail Drop Shadow (light coming from top-left)
+      const topShadow = ctx.createLinearGradient(0, PLAY_MIN, 0, PLAY_MIN + 26);
+      topShadow.addColorStop(0, 'rgba(12, 5, 2, 0.72)');
+      topShadow.addColorStop(0.35, 'rgba(20, 8, 3, 0.42)');
+      topShadow.addColorStop(1, 'rgba(25, 12, 4, 0)');
+      ctx.fillStyle = topShadow;
+      ctx.fillRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, 26);
+
+      // Left Inner Rail Drop Shadow
+      const leftShadow = ctx.createLinearGradient(PLAY_MIN, 0, PLAY_MIN + 26, 0);
+      leftShadow.addColorStop(0, 'rgba(12, 5, 2, 0.72)');
+      leftShadow.addColorStop(0.35, 'rgba(20, 8, 3, 0.42)');
+      leftShadow.addColorStop(1, 'rgba(25, 12, 4, 0)');
+      ctx.fillStyle = leftShadow;
+      ctx.fillRect(PLAY_MIN, PLAY_MIN, 26, PLAY_MAX - PLAY_MIN);
+
+      // Bottom Inner Rail Ambient Occlusion Shadow
+      const bottomShadow = ctx.createLinearGradient(0, PLAY_MAX, 0, PLAY_MAX - 18);
+      bottomShadow.addColorStop(0, 'rgba(15, 6, 2, 0.52)');
+      bottomShadow.addColorStop(1, 'rgba(20, 10, 4, 0)');
+      ctx.fillStyle = bottomShadow;
+      ctx.fillRect(PLAY_MIN, PLAY_MAX - 18, PLAY_MAX - PLAY_MIN, 18);
+
+      // Right Inner Rail Ambient Occlusion Shadow
+      const rightShadow = ctx.createLinearGradient(PLAY_MAX, 0, PLAY_MAX - 18, 0);
+      rightShadow.addColorStop(0, 'rgba(15, 6, 2, 0.52)');
+      rightShadow.addColorStop(1, 'rgba(20, 10, 4, 0)');
+      ctx.fillStyle = rightShadow;
+      ctx.fillRect(PLAY_MAX - 18, PLAY_MIN, 18, PLAY_MAX - PLAY_MIN);
+
+      // Physical Rebound Rubber Cushion Strips along all 4 frame walls
+      ctx.strokeStyle = '#220D04';
+      ctx.lineWidth = 3.5;
+      ctx.strokeRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, PLAY_MAX - PLAY_MIN);
+
+      // Cushion Inner Bevel Highlight
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(PLAY_MIN + 2, PLAY_MIN + 2, PLAY_MAX - PLAY_MIN - 4, PLAY_MAX - PLAY_MIN - 4);
+      ctx.restore();
+
+      // -------------------------------------------------------------
+      // 3. AUTHENTIC CIRCULAR NET HOLES WITH WOVEN NET MESH & DEPTH
       // -------------------------------------------------------------
       for (const pocket of POCKETS) {
-        // Outer dark leather pocket ring
+        // Outer dark cast pocket shadow
         ctx.beginPath();
-        ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS + 3, 0, Math.PI * 2);
-        ctx.fillStyle = '#1A0E08';
+        ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS + 4, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
         ctx.fill();
 
-        // Hole cavity
+        // Outer dark leather pocket ring
+        ctx.beginPath();
+        ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS + 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#180B05';
+        ctx.fill();
+
+        // Hole cavity (deep drop)
+        const holeGrad = ctx.createRadialGradient(pocket.x - 6, pocket.y - 6, 2, pocket.x, pocket.y, POCKET_HOLE_RADIUS);
+        holeGrad.addColorStop(0, '#020305');
+        holeGrad.addColorStop(0.8, '#080A0E');
+        holeGrad.addColorStop(1, '#1A0E08');
         ctx.beginPath();
         ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS, 0, Math.PI * 2);
-        ctx.fillStyle = '#06080B';
+        ctx.fillStyle = holeGrad;
         ctx.fill();
 
         // Woven Net Mesh Texture inside circular pocket
@@ -1605,149 +2152,294 @@ export default function App() {
         ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS - 1, 0, Math.PI * 2);
         ctx.clip();
 
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
         ctx.lineWidth = 1.2;
-        for (let offset = -40; offset <= 40; offset += 8) {
+        for (let offset = -44; offset <= 44; offset += 8) {
           ctx.beginPath();
-          ctx.moveTo(pocket.x - 40, pocket.y + offset);
-          ctx.lineTo(pocket.x + 40, pocket.y + offset + 24);
+          ctx.moveTo(pocket.x - 44, pocket.y + offset);
+          ctx.lineTo(pocket.x + 44, pocket.y + offset + 26);
           ctx.stroke();
           ctx.beginPath();
-          ctx.moveTo(pocket.x - 40, pocket.y + offset + 24);
-          ctx.lineTo(pocket.x + 40, pocket.y + offset);
+          ctx.moveTo(pocket.x - 44, pocket.y + offset + 26);
+          ctx.lineTo(pocket.x + 44, pocket.y + offset);
           ctx.stroke();
         }
         ctx.restore();
 
-        // Thin brass ring rim
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = 'rgba(184, 130, 48, 0.4)';
+        // Polished brass ring rim
+        ctx.lineWidth = 2.2;
+        ctx.strokeStyle = 'rgba(196, 142, 54, 0.55)';
         ctx.beginPath();
         ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS, 0, Math.PI * 2);
         ctx.stroke();
       }
 
-      // --- TRADITIONAL CARROM INLAYS ---
-      ctx.strokeStyle = 'rgba(92, 45, 18, 0.5)';
-      ctx.lineWidth = 2;
+      // -------------------------------------------------------------
+      // REQUIREMENT 5: EXACT CENTER CIRCULAR COMPASS DESIGN
+      // (Matching uploaded reference image Screenshot 2026-11-08 135550)
+      // -------------------------------------------------------------
+      ctx.save();
+      const centerImg = centerDesignImgRef.current;
+      if (centerImg && centerImg.complete && centerImg.naturalWidth > 0) {
+        // Draw the exact uploaded reference artwork centered on the board
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(400, 400, 114, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(centerImg, 400 - 114, 400 - 114, 228, 228);
+        ctx.restore();
+      }
 
-      // Center Circle & Concentric Rosette
-      ctx.beginPath();
-      ctx.arc(400, 400, 40, 0, Math.PI * 2);
-      ctx.stroke();
+      // Crisp Vector Compass Inlay Overlay (Ensures razor-sharp precision at any resolution)
+      const compassBrown = '#361807';
+      const compassLight = '#F3E2C7';
+      const compassDark = '#251004';
 
+      // Outermost concentric solid double ring (radius 108 & 104)
+      ctx.strokeStyle = compassBrown;
+      ctx.lineWidth = 2.2;
       ctx.beginPath();
       ctx.arc(400, 400, 108, 0, Math.PI * 2);
       ctx.stroke();
 
-      for (let i = 0; i < 12; i++) {
-        const ang = (i * Math.PI) / 6;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(400, 400, 104, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Concentric Dashed Circle (radius 86)
+      ctx.save();
+      ctx.beginPath();
+      ctx.setLineDash([5, 5]);
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = '#4A230A';
+      ctx.arc(400, 400, 86, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // Intermediate solid circle (radius 64)
+      ctx.strokeStyle = compassBrown;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(400, 400, 64, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // 8-Point Faceted Compass Star (4 Cardinal points, 4 Diagonal points)
+      const numPoints = 8;
+      for (let p = 0; p < numPoints; p++) {
+        const isCardinal = p % 2 === 0;
+        const tipAngle = (p * Math.PI) / 4;
+        const tipRadius = isCardinal ? 104 : 82;
+        const baseWidthAngle = isCardinal ? 0.22 : 0.18;
+
+        const tipX = 400 + Math.cos(tipAngle) * tipRadius;
+        const tipY = 400 + Math.sin(tipAngle) * tipRadius;
+
+        const leftBaseAngle = tipAngle - baseWidthAngle;
+        const rightBaseAngle = tipAngle + baseWidthAngle;
+        const baseRadius = 22;
+
+        const leftBaseX = 400 + Math.cos(leftBaseAngle) * baseRadius;
+        const leftBaseY = 400 + Math.sin(leftBaseAngle) * baseRadius;
+        const rightBaseX = 400 + Math.cos(rightBaseAngle) * baseRadius;
+        const rightBaseY = 400 + Math.sin(rightBaseAngle) * baseRadius;
+
+        // Dark half (left facet)
         ctx.beginPath();
-        ctx.arc(400 + Math.cos(ang) * 58, 400 + Math.sin(ang) * 58, 22, 0, Math.PI * 2);
+        ctx.moveTo(400, 400);
+        ctx.lineTo(leftBaseX, leftBaseY);
+        ctx.lineTo(tipX, tipY);
+        ctx.closePath();
+        ctx.fillStyle = compassDark;
+        ctx.fill();
+        ctx.strokeStyle = '#1A0C04';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Light cream half (right facet)
+        ctx.beginPath();
+        ctx.moveTo(400, 400);
+        ctx.lineTo(rightBaseX, rightBaseY);
+        ctx.lineTo(tipX, tipY);
+        ctx.closePath();
+        ctx.fillStyle = compassLight;
+        ctx.fill();
+        ctx.strokeStyle = '#1A0C04';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Center spine line
+        ctx.beginPath();
+        ctx.moveTo(400, 400);
+        ctx.lineTo(tipX, tipY);
+        ctx.strokeStyle = '#1E0D04';
+        ctx.lineWidth = 1.2;
         ctx.stroke();
       }
 
-      // 4 BASELINES
-      const horizontalBaselines = [PLAYER_BASELINE_Y, BOT_BASELINE_Y];
-      for (const by of horizontalBaselines) {
-        ctx.beginPath();
-        ctx.roundRect(BASELINE_MIN_X - 16, by - 12, (BASELINE_MAX_X - BASELINE_MIN_X) + 32, 24, 12);
-        ctx.fillStyle = 'rgba(180, 125, 80, 0.35)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(92, 45, 18, 0.6)';
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
+      // Inner double ring around hub (radius 22 and 16)
+      ctx.strokeStyle = compassBrown;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(400, 400, 22, 0, Math.PI * 2);
+      ctx.stroke();
 
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(400, 400, 16, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Central Bullseye: Solid Red Circle with Dark Rim (Center Queen Spot)
+      ctx.beginPath();
+      ctx.arc(400, 400, 9.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#C02626';
+      ctx.fill();
+      ctx.strokeStyle = '#260E03';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+
+      // -------------------------------------------------------------
+      // REQUIREMENT 6: ACCURATE & IDENTICAL 4 BASELINES (SAME SIZE & PROPORTIONS)
+      // -------------------------------------------------------------
+      // Distance from center is exactly 248 on all 4 sides (symmetrical ICF specs)
+      const BASELINE_OFFSET = 248;
+      const TRACK_WIDTH = 28;
+      const LINE_SEP = 12;
+      const CIRCLE_RADIUS = 18;
+      const RED_DOT_RADIUS = 5.5;
+
+      const drawBaseline = (isVertical: boolean, axisVal: number) => {
+        ctx.save();
+        const minCoord = BASELINE_MIN_X;
+        const maxCoord = BASELINE_MAX_X;
+        const span = maxCoord - minCoord;
+
+        // Rounded track backing
         ctx.beginPath();
-        ctx.moveTo(BASELINE_MIN_X, by - 4);
-        ctx.lineTo(BASELINE_MAX_X, by - 4);
-        ctx.moveTo(BASELINE_MIN_X, by + 4);
-        ctx.lineTo(BASELINE_MAX_X, by + 4);
-        ctx.strokeStyle = 'rgba(75, 35, 12, 0.7)';
+        if (isVertical) {
+          ctx.roundRect(axisVal - TRACK_WIDTH / 2, minCoord - 14, TRACK_WIDTH, span + 28, 14);
+        } else {
+          ctx.roundRect(minCoord - 14, axisVal - TRACK_WIDTH / 2, span + 28, TRACK_WIDTH, 14);
+        }
+        ctx.fillStyle = 'rgba(196, 142, 88, 0.28)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(92, 45, 18, 0.55)';
         ctx.lineWidth = 1.2;
         ctx.stroke();
 
-        for (const cx of [BASELINE_MIN_X, BASELINE_MAX_X]) {
-          ctx.beginPath();
-          ctx.arc(cx, by, 18, 0, Math.PI * 2);
-          ctx.fillStyle = '#C48858';
-          ctx.fill();
-          ctx.strokeStyle = '#6E3212';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc(cx, by, 5, 0, Math.PI * 2);
-          ctx.fillStyle = '#D92D20';
-          ctx.fill();
-        }
-      }
-
-      const verticalBaselines = [BOT_BASELINE_Y, PLAYER_BASELINE_Y];
-      for (const bx of verticalBaselines) {
-        ctx.beginPath();
-        ctx.roundRect(bx - 12, BASELINE_MIN_X - 16, 24, (BASELINE_MAX_X - BASELINE_MIN_X) + 32, 12);
-        ctx.fillStyle = 'rgba(180, 125, 80, 0.35)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(92, 45, 18, 0.6)';
+        // Parallel guide lines
+        ctx.strokeStyle = 'rgba(75, 32, 10, 0.75)';
         ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        if (isVertical) {
+          ctx.moveTo(axisVal - LINE_SEP / 2, minCoord);
+          ctx.lineTo(axisVal - LINE_SEP / 2, maxCoord);
+          ctx.moveTo(axisVal + LINE_SEP / 2, minCoord);
+          ctx.lineTo(axisVal + LINE_SEP / 2, maxCoord);
+        } else {
+          ctx.moveTo(minCoord, axisVal - LINE_SEP / 2);
+          ctx.lineTo(maxCoord, axisVal - LINE_SEP / 2);
+          ctx.moveTo(minCoord, axisVal + LINE_SEP / 2);
+          ctx.lineTo(maxCoord, axisVal + LINE_SEP / 2);
+        }
         ctx.stroke();
 
-        for (const cy of [BASELINE_MIN_X, BASELINE_MAX_X]) {
+        // Circular endpoint bases with solid red inner dots (Identical on all 4 baselines)
+        const endpoints = [minCoord, maxCoord];
+        for (const ep of endpoints) {
+          const cx = isVertical ? axisVal : ep;
+          const cy = isVertical ? ep : axisVal;
+
           ctx.beginPath();
-          ctx.arc(bx, cy, 18, 0, Math.PI * 2);
-          ctx.fillStyle = '#C48858';
+          ctx.arc(cx, cy, CIRCLE_RADIUS, 0, Math.PI * 2);
+          ctx.fillStyle = '#C89360';
           ctx.fill();
-          ctx.strokeStyle = '#6E3212';
+          ctx.strokeStyle = '#5E270A';
           ctx.lineWidth = 2;
           ctx.stroke();
 
+          // Center solid red dot
           ctx.beginPath();
-          ctx.arc(bx, cy, 5, 0, Math.PI * 2);
+          ctx.arc(cx, cy, RED_DOT_RADIUS, 0, Math.PI * 2);
           ctx.fillStyle = '#D92D20';
           ctx.fill();
+          ctx.strokeStyle = '#381303';
+          ctx.lineWidth = 1;
+          ctx.stroke();
         }
-      }
+        ctx.restore();
+      };
+
+      // Draw all 4 identical baselines
+      drawBaseline(false, 400 + BASELINE_OFFSET); // Player Bottom Baseline
+      drawBaseline(false, 400 - BASELINE_OFFSET); // Opponent Top Baseline
+      drawBaseline(true, 400 - BASELINE_OFFSET);  // Left Baseline
+      drawBaseline(true, 400 + BASELINE_OFFSET);  // Right Baseline
 
       // -------------------------------------------------------------
-      // RULE 5: ARROWS TERMINATE BEFORE NET HOLES (NEVER TOUCH NET HOLES)
+      // FOUL POINTER ARROWS TOWARDS 4 CORNERS (EXACT LIKE REFERENCE)
       // -------------------------------------------------------------
       for (const pocket of POCKETS) {
         const ang = Math.atan2(pocket.y - 400, pocket.x - 400);
-
-        // Arrow line starts outside the center mandala and ends 185px away from net hole
-        const arrowStartDist = 115;
-        const arrowEndDist = 270;
+        const arrowStartDist = 120;
+        const arrowEndDist = 265;
 
         const startX = 400 + Math.cos(ang) * arrowStartDist;
         const startY = 400 + Math.sin(ang) * arrowStartDist;
         const endX = 400 + Math.cos(ang) * arrowEndDist;
         const endY = 400 + Math.sin(ang) * arrowEndDist;
 
+        // Diagonal pointer shaft
         ctx.beginPath();
         ctx.moveTo(startX, startY);
         ctx.lineTo(endX, endY);
-        ctx.strokeStyle = 'rgba(92, 45, 18, 0.65)';
-        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = 'rgba(75, 32, 10, 0.7)';
+        ctx.lineWidth = 1.8;
         ctx.stroke();
 
-        // Tip circle at end (cleanly outside net hole)
+        // Circular Hook Arc with Two Arrowheads (Matching reference image)
+        const hookRadius = 26;
+        ctx.save();
+        ctx.translate(endX, endY);
+        ctx.rotate(ang);
+
         ctx.beginPath();
-        ctx.arc(endX, endY, 5, 0, Math.PI * 2);
-        ctx.fillStyle = '#6E3212';
+        ctx.arc(0, 0, hookRadius, -Math.PI * 0.72, Math.PI * 0.72);
+        ctx.strokeStyle = 'rgba(75, 32, 10, 0.75)';
+        ctx.lineWidth = 1.8;
+        ctx.stroke();
+
+        // Arrowhead 1 (top arc tip)
+        const a1Ang = -Math.PI * 0.72;
+        const a1X = Math.cos(a1Ang) * hookRadius;
+        const a1Y = Math.sin(a1Ang) * hookRadius;
+        ctx.beginPath();
+        ctx.moveTo(a1X, a1Y);
+        ctx.lineTo(a1X + 4, a1Y - 6);
+        ctx.lineTo(a1X - 6, a1Y - 4);
+        ctx.closePath();
+        ctx.fillStyle = '#4D2208';
         ctx.fill();
 
-        // Foul arc near the baseline intersection (distance 190 from center)
-        const arcCenterX = 400 + Math.cos(ang) * 190;
-        const arcCenterY = 400 + Math.sin(ang) * 190;
+        // Arrowhead 2 (bottom arc tip)
+        const a2Ang = Math.PI * 0.72;
+        const a2X = Math.cos(a2Ang) * hookRadius;
+        const a2Y = Math.sin(a2Ang) * hookRadius;
         ctx.beginPath();
-        ctx.arc(arcCenterX, arcCenterY, 32, ang - 0.45, ang + 0.45);
-        ctx.strokeStyle = 'rgba(92, 45, 18, 0.5)';
-        ctx.stroke();
-      }
-      ctx.restore();
+        ctx.moveTo(a2X, a2Y);
+        ctx.lineTo(a2X + 4, a2Y + 6);
+        ctx.lineTo(a2X - 6, a2Y + 4);
+        ctx.closePath();
+        ctx.fillStyle = '#4D2208';
+        ctx.fill();
 
-      // --- DRAW ALL PUCKS / COINS (REQUIREMENT 6: 3D SHADOWS & ROTATIONAL ANIMATIONS) ---
+        ctx.restore();
+      }
+
+      // -------------------------------------------------------------
+      // REQUIREMENT 7 & 8: ULTRA-REALISTIC 3D COINS & TOURNAMENT PUCKS
+      // -------------------------------------------------------------
       const activeCoins = coinsRef.current.filter((c) => !c.isPocketed);
       for (const coin of activeCoins) {
         ctx.save();
@@ -1756,24 +2448,24 @@ export default function App() {
 
         const speed = Math.hypot(coin.vx, coin.vy);
 
-        // Dynamic 3D Shadows
-        // 1. Ambient Occlusion Shadow directly beneath
+        // Dynamic 3D Layered Shadows
+        // 1. Ambient Occlusion Contact Shadow directly beneath
         ctx.beginPath();
-        ctx.ellipse(1, 1.5, coin.radius * 1.02, coin.radius * 0.98, 0, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(10, 5, 2, 0.45)';
+        ctx.ellipse(0.8, 1.8, coin.radius * 1.04, coin.radius * 0.98, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(8, 3, 1, 0.48)';
         ctx.fill();
 
-        // 2. Cast Directional Shadow (simulating warm top-left table light)
-        const shadowX = 3.5 + Math.min(3, speed * 0.12);
-        const shadowY = 4.8 + Math.min(4, speed * 0.15);
+        // 2. Cast Directional Shadow (simulating overhead arena lighting)
+        const shadowX = 3.8 + Math.min(3.5, speed * 0.14);
+        const shadowY = 5.2 + Math.min(4.5, speed * 0.18);
         ctx.beginPath();
         ctx.ellipse(shadowX, shadowY, coin.radius * 0.98, coin.radius * 0.92, 0, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
         ctx.fill();
 
-        // High-speed motion blur trail
-        if (speed > 2.5) {
-          const trailLen = Math.min(32, speed * 2.2);
+        // Dynamic motion streak when sliding fast
+        if (speed > 2.2) {
+          const trailLen = Math.min(36, speed * 2.4);
           const moveAngle = Math.atan2(coin.vy, coin.vx);
           ctx.beginPath();
           ctx.moveTo(0, 0);
@@ -1782,35 +2474,36 @@ export default function App() {
           ctx.lineCap = 'round';
           ctx.strokeStyle =
             coin.type === 'queen'
-              ? 'rgba(239, 68, 68, 0.22)'
+              ? 'rgba(239, 68, 68, 0.25)'
               : coin.type === 'white'
-              ? 'rgba(255, 255, 255, 0.2)'
-              : 'rgba(30, 41, 59, 0.3)';
+              ? 'rgba(255, 255, 255, 0.24)'
+              : 'rgba(30, 41, 59, 0.32)';
           ctx.stroke();
         }
 
-        // Apply angular rotation for spinning disc animation
+        // Disc rotation animation
         if (coin.rotation) {
           ctx.rotate(coin.rotation);
         }
 
-        // 3D Beveled Coin Body
+        // 3D Beveled Coin Body (Realistic Boxwood & Ebonite)
         const cGrad = ctx.createRadialGradient(-coin.radius * 0.35, -coin.radius * 0.35, 2, 0, 0, coin.radius);
 
         if (coin.type === 'queen') {
-          cGrad.addColorStop(0, '#FF5A5A');
-          cGrad.addColorStop(0.4, '#E02424');
-          cGrad.addColorStop(0.85, '#991B1B');
-          cGrad.addColorStop(1, '#5C0B0B');
+          cGrad.addColorStop(0, '#FF4D4D');
+          cGrad.addColorStop(0.35, '#DC2626');
+          cGrad.addColorStop(0.75, '#991B1B');
+          cGrad.addColorStop(1, '#500707');
         } else if (coin.type === 'white') {
           cGrad.addColorStop(0, '#FFFFFF');
-          cGrad.addColorStop(0.35, '#F5F0E6');
-          cGrad.addColorStop(0.75, '#D6C8B2');
-          cGrad.addColorStop(1, '#94836D');
+          cGrad.addColorStop(0.32, '#F8F4EC');
+          cGrad.addColorStop(0.72, '#DFD3C0');
+          cGrad.addColorStop(0.92, '#C2B198');
+          cGrad.addColorStop(1, '#8A775E');
         } else {
           cGrad.addColorStop(0, '#475569');
-          cGrad.addColorStop(0.4, '#1E293B');
-          cGrad.addColorStop(0.85, '#0F172A');
+          cGrad.addColorStop(0.32, '#1E293B');
+          cGrad.addColorStop(0.75, '#0F172A');
           cGrad.addColorStop(1, '#020617');
         }
 
@@ -1819,32 +2512,32 @@ export default function App() {
         ctx.fillStyle = cGrad;
         ctx.fill();
 
-        // Outer 3D chamfered rim highlight & shade
+        // Outer chamfered rim highlight
         ctx.lineWidth = 1.4;
         ctx.strokeStyle =
           coin.type === 'queen'
-            ? 'rgba(254, 202, 202, 0.5)'
+            ? 'rgba(254, 202, 202, 0.65)'
             : coin.type === 'white'
-            ? 'rgba(255, 255, 255, 0.8)'
-            : 'rgba(148, 163, 184, 0.45)';
+            ? 'rgba(255, 255, 255, 0.9)'
+            : 'rgba(148, 163, 184, 0.5)';
         ctx.beginPath();
         ctx.arc(0, 0, coin.radius - 0.7, 0, Math.PI * 2);
         ctx.stroke();
 
-        // Concave central depression / inner bowl (characteristic carrommen dish)
+        // Inner lathe-turned dished depression (Authentic Carrommen bowl)
         const bowlGrad = ctx.createRadialGradient(0, 0, 1, 0, 0, coin.radius * 0.72);
         if (coin.type === 'queen') {
-          bowlGrad.addColorStop(0, '#B91C1C');
+          bowlGrad.addColorStop(0, '#991B1B');
           bowlGrad.addColorStop(0.7, '#7F1D1D');
-          bowlGrad.addColorStop(1, '#991B1B');
+          bowlGrad.addColorStop(1, '#B91C1C');
         } else if (coin.type === 'white') {
-          bowlGrad.addColorStop(0, '#EAE1D1');
-          bowlGrad.addColorStop(0.7, '#C5B59E');
-          bowlGrad.addColorStop(1, '#D8CCA8');
+          bowlGrad.addColorStop(0, '#EDE4D6');
+          bowlGrad.addColorStop(0.7, '#C8B9A2');
+          bowlGrad.addColorStop(1, '#DDD3C1');
         } else {
           bowlGrad.addColorStop(0, '#1E293B');
           bowlGrad.addColorStop(0.7, '#0F172A');
-          bowlGrad.addColorStop(1, '#1A2230');
+          bowlGrad.addColorStop(1, '#1E293B');
         }
 
         ctx.beginPath();
@@ -1852,61 +2545,61 @@ export default function App() {
         ctx.fillStyle = bowlGrad;
         ctx.fill();
 
-        // Concentric engraved rings and grain details
+        // Concentric engraved lathe rings
         ctx.lineWidth = 1.1;
         ctx.strokeStyle =
           coin.type === 'queen'
             ? '#FBBF24'
             : coin.type === 'white'
-            ? 'rgba(120, 85, 55, 0.35)'
-            : 'rgba(255, 255, 255, 0.2)';
+            ? 'rgba(110, 78, 48, 0.4)'
+            : 'rgba(255, 255, 255, 0.22)';
 
         ctx.beginPath();
         ctx.arc(0, 0, coin.radius * 0.48, 0, Math.PI * 2);
         ctx.stroke();
 
-        // Center jewel / emblem
+        // Center emblem / starburst
         if (coin.type === 'queen') {
-          // Embossed golden 6-petal starburst
+          // Embossed golden 8-point royal star inlay
           ctx.fillStyle = '#F59E0B';
-          for (let petal = 0; petal < 6; petal++) {
-            const petalAng = (petal * Math.PI) / 3;
+          for (let petal = 0; petal < 8; petal++) {
+            const petalAng = (petal * Math.PI) / 4;
             ctx.beginPath();
-            ctx.arc(Math.cos(petalAng) * 4.2, Math.sin(petalAng) * 4.2, 1.8, 0, Math.PI * 2);
+            ctx.arc(Math.cos(petalAng) * 4.5, Math.sin(petalAng) * 4.5, 1.6, 0, Math.PI * 2);
             ctx.fill();
           }
           ctx.beginPath();
-          ctx.arc(0, 0, 2.8, 0, Math.PI * 2);
+          ctx.arc(0, 0, 3.2, 0, Math.PI * 2);
           ctx.fillStyle = '#FEF08A';
           ctx.fill();
-        } else {
-          // Subtle woodgrain spinning radial spokes
-          ctx.strokeStyle =
-            coin.type === 'white' ? 'rgba(120, 85, 55, 0.22)' : 'rgba(255, 255, 255, 0.12)';
+          ctx.strokeStyle = '#D97706';
           ctx.lineWidth = 0.8;
-          for (let sp = 0; sp < 4; sp++) {
-            const spAng = (sp * Math.PI) / 2;
-            ctx.beginPath();
-            ctx.moveTo(Math.cos(spAng) * 2, Math.sin(spAng) * 2);
-            ctx.lineTo(Math.cos(spAng) * (coin.radius * 0.44), Math.sin(spAng) * (coin.radius * 0.44));
-            ctx.stroke();
-          }
+          ctx.stroke();
+        } else {
+          // Subtle woodgrain lathe rings
           ctx.beginPath();
-          ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+          ctx.arc(0, 0, coin.radius * 0.28, 0, Math.PI * 2);
+          ctx.strokeStyle = coin.type === 'white' ? 'rgba(110, 78, 48, 0.3)' : 'rgba(255, 255, 255, 0.16)';
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(0, 0, 2.6, 0, Math.PI * 2);
           ctx.fillStyle = coin.type === 'white' ? '#8C7760' : '#475569';
           ctx.fill();
         }
 
         // Top-left glossy specular shine
         ctx.beginPath();
-        ctx.arc(-coin.radius * 0.38, -coin.radius * 0.38, coin.radius * 0.18, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+        ctx.arc(-coin.radius * 0.38, -coin.radius * 0.38, coin.radius * 0.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
         ctx.fill();
 
         ctx.restore();
       }
 
-      // --- DRAW STRIKER (PROFESSIONAL 3D ACRYLIC TOURNAMENT STRIKER & MOTION TRAIL) ---
+      // -------------------------------------------------------------
+      // REQUIREMENT 7 & 8: TOURNAMENT HEAVY IVORY / RESIN STRIKER
+      // -------------------------------------------------------------
       const striker = strikerRef.current;
       if (!striker.isPocketed) {
         ctx.save();
@@ -1915,110 +2608,118 @@ export default function App() {
 
         const strikerSpeed = Math.hypot(striker.vx, striker.vy);
 
-        // Striker 3D Shadows
+        // Striker 3D Multi-Layer Shadows
         // 1. Ambient Occlusion Contact Shadow
         ctx.beginPath();
-        ctx.ellipse(1, 2, striker.radius * 1.04, striker.radius * 0.98, 0, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.52)';
+        ctx.ellipse(1, 2.2, striker.radius * 1.05, striker.radius * 0.98, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
         ctx.fill();
 
         // 2. Cast Directional Shadow
-        const sShadowX = 4.5 + Math.min(4, strikerSpeed * 0.18);
-        const sShadowY = 6.2 + Math.min(5, strikerSpeed * 0.22);
+        const sShadowX = 4.8 + Math.min(4, strikerSpeed * 0.18);
+        const sShadowY = 6.6 + Math.min(5, strikerSpeed * 0.22);
         ctx.beginPath();
         ctx.ellipse(sShadowX, sShadowY, striker.radius * 1.0, striker.radius * 0.94, 0, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.36)';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
         ctx.fill();
 
         // Dynamic High-Speed Motion Trail
-        if (strikerSpeed > 3.0) {
-          const sTrailLen = Math.min(48, strikerSpeed * 2.8);
+        if (strikerSpeed > 2.8) {
+          const sTrailLen = Math.min(52, strikerSpeed * 2.8);
           const sMoveAngle = Math.atan2(striker.vy, striker.vx);
           ctx.beginPath();
           ctx.moveTo(0, 0);
           ctx.lineTo(-Math.cos(sMoveAngle) * sTrailLen, -Math.sin(sMoveAngle) * sTrailLen);
           ctx.lineWidth = striker.radius * 1.6;
           ctx.lineCap = 'round';
-          ctx.strokeStyle = 'rgba(251, 191, 36, 0.3)';
+          ctx.strokeStyle = 'rgba(251, 191, 36, 0.32)';
           ctx.stroke();
         }
 
-        // Heavy Tournament Ivory / Phenolic Resin Striker Body
+        // Heavy Tournament Ivory Body with Polished Luster
         const sGrad = ctx.createRadialGradient(-striker.radius * 0.35, -striker.radius * 0.35, 3, 0, 0, striker.radius);
         sGrad.addColorStop(0, '#FFFFFF');
-        sGrad.addColorStop(0.35, '#FBF9F5');
-        sGrad.addColorStop(0.7, '#E5DDCF');
-        sGrad.addColorStop(0.92, '#C2B5A0');
-        sGrad.addColorStop(1, '#8A7B66');
+        sGrad.addColorStop(0.35, '#FBF8F2');
+        sGrad.addColorStop(0.7, '#E8DFCE');
+        sGrad.addColorStop(0.92, '#C7B89E');
+        sGrad.addColorStop(1, '#8C7A62');
 
         ctx.beginPath();
         ctx.arc(0, 0, striker.radius, 0, Math.PI * 2);
         ctx.fillStyle = sGrad;
         ctx.fill();
 
-        // Outer Metallic Gold Rim with 3D bevel
+        // Outer Metallic Gold Rim with 3D Bevel
         ctx.lineWidth = 2.4;
         ctx.strokeStyle = '#D99B26';
         ctx.stroke();
 
-        ctx.lineWidth = 1.0;
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.lineWidth = 1.1;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
         ctx.beginPath();
         ctx.arc(0, 0, striker.radius - 1.2, 0, Math.PI * 2);
         ctx.stroke();
 
-        // Middle Concentric Recessed Ring
+        // Concentric Engraved Gold Grooves
         ctx.beginPath();
-        ctx.arc(0, 0, striker.radius * 0.68, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(217, 155, 38, 0.7)';
+        ctx.arc(0, 0, striker.radius * 0.72, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(217, 155, 38, 0.75)';
         ctx.lineWidth = 1.5;
         ctx.stroke();
 
+        ctx.beginPath();
+        ctx.arc(0, 0, striker.radius * 0.58, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(217, 155, 38, 0.6)';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+
         // Inner Brass / Amber Gem Medallion
-        const innerGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, striker.radius * 0.52);
+        const innerGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, striker.radius * 0.48);
         innerGrad.addColorStop(0, '#FEF3C7');
         innerGrad.addColorStop(0.45, '#F59E0B');
         innerGrad.addColorStop(0.85, '#B45309');
         innerGrad.addColorStop(1, '#78350F');
 
         ctx.beginPath();
-        ctx.arc(0, 0, striker.radius * 0.52, 0, Math.PI * 2);
+        ctx.arc(0, 0, striker.radius * 0.48, 0, Math.PI * 2);
         ctx.fillStyle = innerGrad;
         ctx.fill();
         ctx.strokeStyle = '#FDE68A';
         ctx.lineWidth = 1.2;
         ctx.stroke();
 
-        // Radial Sunburst Rays in center
-        ctx.strokeStyle = 'rgba(254, 240, 138, 0.65)';
-        ctx.lineWidth = 1.0;
+        // 8-Facet Radial Golden Rays in center
+        ctx.strokeStyle = 'rgba(254, 240, 138, 0.75)';
+        ctx.lineWidth = 1.1;
         for (let ray = 0; ray < 8; ray++) {
           const rayAng = (ray * Math.PI) / 4;
           ctx.beginPath();
           ctx.moveTo(Math.cos(rayAng) * 3, Math.sin(rayAng) * 3);
-          ctx.lineTo(Math.cos(rayAng) * (striker.radius * 0.44), Math.sin(rayAng) * (striker.radius * 0.44));
+          ctx.lineTo(Math.cos(rayAng) * (striker.radius * 0.42), Math.sin(rayAng) * (striker.radius * 0.42));
           ctx.stroke();
         }
 
-        // Center polished ruby/gold core
+        // Center Polished Ruby Jewel Core
         ctx.beginPath();
-        ctx.arc(0, 0, 3.8, 0, Math.PI * 2);
+        ctx.arc(0, 0, 4.2, 0, Math.PI * 2);
         ctx.fillStyle = '#EF4444';
         ctx.fill();
         ctx.strokeStyle = '#FDE047';
-        ctx.lineWidth = 1;
+        ctx.lineWidth = 1.2;
         ctx.stroke();
 
-        // Crisp Specular Glint
+        // Specular Glint
         ctx.beginPath();
         ctx.arc(-striker.radius * 0.38, -striker.radius * 0.38, striker.radius * 0.22, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
         ctx.fill();
 
         ctx.restore();
       }
 
-      // --- DYNAMIC DARK CIRCLE & DRAG FORCE INDICATOR ---
+      // -------------------------------------------------------------
+      // REQUIREMENT 1: DYNAMIC DRAG GAUGE & SHORTER WHITE DOTTED LINE
+      // -------------------------------------------------------------
       if (isDraggingStriker && dragForce.power > 0.02 && currentTurnRef.current === 'player') {
         ctx.save();
 
@@ -2059,7 +2760,7 @@ export default function App() {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        const arrowLength = 36 + dragForce.power * 72;
+        const arrowLength = 34 + dragForce.power * 68;
         const arrowStartX = striker.x + dragForce.dirX * (STRIKER_RADIUS + 2);
         const arrowStartY = striker.y + dragForce.dirY * (STRIKER_RADIUS + 2);
         const arrowEndX = striker.x + dragForce.dirX * (STRIKER_RADIUS + arrowLength);
@@ -2094,35 +2795,23 @@ export default function App() {
         ctx.fillStyle = '#FFE600';
         ctx.fill();
 
-        const trajectoryLen = 130 + dragForce.power * 210;
+        // Shorter White Dotted Line (Requirement 1: exactly shortened for clean aim)
+        const trajectoryLen = 45 + dragForce.power * 55;
         ctx.beginPath();
-        ctx.setLineDash([4, 6]);
+        ctx.setLineDash([4, 5]);
         ctx.moveTo(arrowEndX, arrowEndY);
         ctx.lineTo(
           arrowEndX + dragForce.dirX * trajectoryLen,
           arrowEndY + dragForce.dirY * trajectoryLen
         );
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
-        ctx.lineWidth = 2.4;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.lineWidth = 2.2;
         ctx.stroke();
         ctx.setLineDash([]);
 
         ctx.restore();
       }
 
-      // Bot Aim Telegraph
-      if (botAimLineRef.current) {
-        const b = botAimLineRef.current;
-        ctx.save();
-        ctx.setLineDash([5, 5]);
-        ctx.lineWidth = 2.2;
-        ctx.strokeStyle = 'rgba(239, 68, 68, 0.7)';
-        ctx.beginPath();
-        ctx.moveTo(b.startX, b.startY);
-        ctx.lineTo(b.endX, b.endY);
-        ctx.stroke();
-        ctx.restore();
-      }
 
       // Particles
       const particles = particlesRef.current;
@@ -2170,6 +2859,7 @@ export default function App() {
         }
       }
 
+      ctx.restore(); // Restore HiDPI scale
       animFrameRef.current = requestAnimationFrame(render);
     };
 
@@ -2244,36 +2934,43 @@ export default function App() {
       {/* --- TOP BAR (MATCHING REFERENCE IMAGE EXACTLY WITH QUEEN INDICATOR) --- */}
       <div className="relative z-10 w-full max-w-[460px] mx-auto px-4 pt-3 pb-1 flex items-center justify-between">
         {/* Left: Opponent Avatar Card with Opponent Name & Queen Indicator */}
-        <div className="flex flex-col items-start gap-1">
+        <div className="flex flex-col items-start gap-1 relative">
           <div className="w-12 h-12 rounded-lg bg-[#2768A3] border-2 border-[#5497D7] flex items-center justify-center shadow-md overflow-hidden relative">
             <User className="w-8 h-8 text-neutral-200 fill-neutral-200" />
             {/* Rule 8: Red Queen Indicator on Scoreboard for Opponent */}
             {queenState === 'pending_bot' && (
-              <div className="absolute top-0 right-0 w-4 h-4 rounded-full bg-red-600 border border-white animate-ping" />
+              <div className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-red-600 border border-white animate-ping" />
             )}
             {queenState === 'covered_bot' && (
-              <div className="absolute bottom-0 right-0 bg-red-600 text-white rounded-full p-0.5 text-[8px]">
-                👑
+              <div className="absolute bottom-0.5 right-0.5 bg-red-950/90 border border-amber-400 text-amber-300 rounded-full p-0.5 shadow-sm">
+                <ScoreboardCarromCoin type="queen" size={12} />
               </div>
             )}
           </div>
-          {/* Real Opponent Name below profile (Rule 6: No Guest) */}
+          {/* Real Opponent Name below profile */}
           <span className="text-[11px] font-bold text-neutral-200 tracking-tight leading-none pl-0.5">
             {opponentName}
           </span>
-          {/* Black Coin Counter: Accurately shows number of black coins pocketed out of 9! */}
-          <div className="flex items-center gap-1 pl-1 mt-0.5">
-            <span className="font-display font-extrabold text-base text-white tabular-nums">
+          {/* Black Coin Counter: Styled to match authentic board coin (Requirement 6) */}
+          <div className="flex items-center gap-1.5 pl-0.5 mt-0.5">
+            <span className="font-display font-black text-base text-white tabular-nums">
               {botBlackPocketed}
             </span>
-            <div className="w-4 h-4 rounded-full bg-neutral-900 border border-neutral-700 shadow-sm" />
+            <ScoreboardCarromCoin type="black" size={20} />
             {queenState === 'covered_bot' && (
-              <div className="w-3.5 h-3.5 rounded-full bg-red-600 border border-white shadow-sm ml-0.5" title="Queen Secured by Opponent" />
+              <ScoreboardCarromCoin type="queen" size={16} />
             )}
           </div>
+
+          {/* Opponent Quick Reaction Bubble on Sender's Side (Requirement 5) */}
+          {chatMessage && chatMessage.sender === 'bot' && (
+            <div className="absolute top-14 left-0 bg-neutral-900/95 border-2 border-amber-400 rounded-2xl px-3 py-1.5 shadow-2xl flex items-center gap-1.5 z-40 animate-bounce whitespace-nowrap">
+              <span className="text-xs font-bold text-amber-300">{chatMessage.text}</span>
+            </div>
+          )}
         </div>
 
-        {/* Center: Gold Coins Stack & Total Pot Display & 10-Second Turn Countdown (Requirement 5) */}
+        {/* Center: Gold Coins Stack & Total Pot Display & Dedicated Queen Coin Status */}
         <div className="flex flex-col items-center justify-center -mt-1">
           <div className="flex items-center justify-center -space-x-1.5 mb-0.5">
             <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-amber-600 via-yellow-400 to-amber-200 border border-yellow-300 shadow-sm flex items-center justify-center text-[10px] font-bold text-amber-900">
@@ -2293,10 +2990,26 @@ export default function App() {
           <span className="text-[10px] text-emerald-300 font-semibold tracking-wider uppercase mt-0.5">
             {activeRoom.gameId} · Bet ₹{activeRoom.betAmount}
           </span>
+
+          {/* Queen Status on Scoreboard (Requirement 3 & 6: Authentic 3D Queen Coin) */}
+          <div className="flex items-center gap-1.5 bg-neutral-950/80 border border-neutral-800 rounded-full px-2.5 py-0.5 mt-1 shadow-inner">
+            <ScoreboardCarromCoin type="queen" size={16} />
+            <span className="text-[10px] font-bold tracking-tight text-amber-300">
+              {queenState === 'covered_player'
+                ? 'Secured: You'
+                : queenState === 'covered_bot'
+                ? `Secured: ${opponentName}`
+                : queenState === 'pending_player'
+                ? 'Cover Pending (You)'
+                : queenState === 'pending_bot'
+                ? 'Cover Pending (Opponent)'
+                : 'Queen In Play'}
+            </span>
+          </div>
         </div>
 
         {/* Right: Player Avatar Card with Player Name & Queen Indicator */}
-        <div className="flex flex-col items-end gap-1">
+        <div className="flex flex-col items-end gap-1 relative">
           <div
             className={`w-12 h-12 rounded-lg bg-[#1E609A] border-2 flex items-center justify-center shadow-md overflow-hidden relative transition-all ${
               currentTurn === 'player'
@@ -2307,36 +3020,43 @@ export default function App() {
             <User className="w-8 h-8 text-neutral-100 fill-neutral-100" />
             {/* Rule 8: Red Queen Indicator on Scoreboard for Player */}
             {queenState === 'pending_player' && (
-              <div className="absolute top-0 right-0 w-4 h-4 rounded-full bg-red-600 border border-white animate-ping" />
+              <div className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-red-600 border border-white animate-ping" />
             )}
             {queenState === 'covered_player' && (
-              <div className="absolute bottom-0 right-0 bg-red-600 text-white rounded-full p-0.5 text-[8px]">
-                👑
+              <div className="absolute bottom-0.5 right-0.5 bg-red-950/90 border border-amber-400 text-amber-300 rounded-full p-0.5 shadow-sm">
+                <ScoreboardCarromCoin type="queen" size={12} />
               </div>
             )}
           </div>
-          {/* Real Player Name below profile (Rule 6: No Guest) */}
+          {/* Real Player Name below profile */}
           <span className="text-[11px] font-bold text-emerald-300 tracking-tight leading-none pr-0.5">
             {playerName}
           </span>
-          {/* White Coin Counter: Accurately shows number of white coins pocketed out of 9! */}
-          <div className="flex items-center gap-1 pr-1 mt-0.5">
+          {/* White Coin Counter: Styled to match authentic board coin (Requirement 6) */}
+          <div className="flex items-center gap-1.5 pr-0.5 mt-0.5">
             {queenState === 'covered_player' && (
-              <div className="w-3.5 h-3.5 rounded-full bg-red-600 border border-white shadow-sm mr-0.5" title="Queen Secured by You!" />
+              <ScoreboardCarromCoin type="queen" size={16} />
             )}
-            <div className="w-4 h-4 rounded-full bg-[#EDE8DF] border border-neutral-300 shadow-sm" />
-            <span className="font-display font-extrabold text-base text-white tabular-nums">
+            <ScoreboardCarromCoin type="white" size={20} />
+            <span className="font-display font-black text-base text-white tabular-nums">
               {playerWhitePocketed}
             </span>
           </div>
+
+          {/* Player Quick Reaction Bubble on Sender's Side Near Score Board (Requirement 5) */}
+          {chatMessage && chatMessage.sender === 'player' && (
+            <div className="absolute top-14 right-0 bg-neutral-900/95 border-2 border-emerald-400 rounded-2xl px-3 py-1.5 shadow-2xl flex items-center gap-1.5 z-40 animate-bounce whitespace-nowrap">
+              <span className="text-xs font-bold text-emerald-300">{chatMessage.text}</span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* --- QUEEN STATUS NOTIFIER BANNER (RULE 8) --- */}
+      {/* --- QUEEN STATUS NOTIFIER BANNER (RULE 8 - NO EMOJIS) --- */}
       {queenState === 'pending_player' && (
         <div className="relative z-10 w-full max-w-[420px] mx-auto px-4 -mt-1 mb-1">
-          <div className="bg-red-500/20 border border-red-500/60 rounded-xl px-3 py-1 text-center shadow-sm flex items-center justify-center gap-2 animate-pulse">
-            <span className="text-sm">👑</span>
+          <div className="bg-red-500/20 border border-red-500/60 rounded-xl px-3 py-1.5 text-center shadow-sm flex items-center justify-center gap-2 animate-pulse">
+            <ScoreboardCarromCoin type="queen" size={16} />
             <span className="text-xs font-bold text-red-200">
               Queen Pocketed! Pocket a White coin on this shot to cover and secure the Queen!
             </span>
@@ -2346,8 +3066,8 @@ export default function App() {
 
       {queenState === 'pending_bot' && (
         <div className="relative z-10 w-full max-w-[420px] mx-auto px-4 -mt-1 mb-1">
-          <div className="bg-red-500/20 border border-red-500/60 rounded-xl px-3 py-1 text-center shadow-sm flex items-center justify-center gap-2">
-            <span className="text-sm">👑</span>
+          <div className="bg-red-500/20 border border-red-500/60 rounded-xl px-3 py-1.5 text-center shadow-sm flex items-center justify-center gap-2">
+            <ScoreboardCarromCoin type="queen" size={16} />
             <span className="text-xs font-bold text-red-200">
               Opponent pocketed Queen! Must cover with a Black coin.
             </span>
@@ -2366,14 +3086,7 @@ export default function App() {
             className="w-full h-full cursor-crosshair touch-none select-none"
           />
 
-          {/* Quick Chat Overlay Bubble */}
-          {chatMessage && (
-            <div className="absolute top-10 left-10 bg-neutral-900/90 border border-amber-400/60 rounded-xl px-3 py-1.5 shadow-xl animate-bounce">
-              <span className="text-xs font-bold text-amber-300">{chatMessage.text}</span>
-            </div>
-          )}
-
-          {/* DIRECT ON-SCREEN COUNTDOWN OVERLAY (REQUIREMENT 2: SHOWN ON SCREEN AFTER 5s IDLE) */}
+          {/* DIRECT ON-SCREEN COUNTDOWN OVERLAY (SHOWN ON SCREEN AFTER 5s IDLE) */}
           {idleSeconds >= 5 && turnTimeLeft <= 15 && !isStrikerMoving && !isTurnInProgressRef.current && (
             <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-20">
               <div
@@ -2427,7 +3140,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* --- BOTTOM CONTROLS & ACTION BUTTONS --- */}
+      {/* --- BOTTOM CONTROLS & ACTION BUTTONS (REQUIREMENT 4, 7 & 10: CLEAN PREMIUM CONTROLS) --- */}
       <div className="relative z-10 w-full max-w-[460px] mx-auto px-5 pb-5 pt-1 flex items-center justify-between">
         {/* Bottom Left: Chat Bubble Button */}
         <button
@@ -2438,35 +3151,14 @@ export default function App() {
           <MessageCircle className="w-6 h-6 text-neutral-900 fill-neutral-900" />
         </button>
 
-        {/* Quick Lobby / Match Hub Center Button */}
-        <div className="flex flex-col items-center gap-1">
-          <button
-            onClick={() => setScreen('create_game')}
-            className="bg-emerald-500/20 border border-emerald-400/80 hover:bg-emerald-500/30 px-3 py-1 rounded-full text-[11px] font-bold text-emerald-300 shadow-sm transition-all flex items-center gap-1.5 active:scale-95"
-          >
-            <PlusCircle className="w-3.5 h-3.5" />
-            <span>Create / Join Room</span>
-          </button>
-          <span className="text-[10px] text-neutral-400">
-            {currentTurn === 'player' ? 'Your Turn to Strike' : 'Opponent Thinking...'}
-          </span>
-        </div>
-
-        {/* Bottom Right: Menu Button with "Tap to open menu." tooltip */}
-        <div className="relative flex items-center">
-          <div className="absolute right-16 whitespace-nowrap bg-neutral-900/95 border border-neutral-700/80 rounded-full px-3 py-1 shadow-lg text-[11px] font-semibold text-neutral-200 pointer-events-none flex items-center gap-1">
-            <span>Tap to open menu.</span>
-            <div className="w-1.5 h-1.5 bg-neutral-900 rotate-45 -mr-1 border-r border-b border-neutral-700" />
-          </div>
-
-          <button
-            onClick={() => setActiveModal('menu')}
-            className="w-14 h-14 rounded-full bg-gradient-to-b from-[#F5C242] to-[#D9961A] border-2 border-[#FFF0A0] shadow-[0_4px_14px_rgba(217,150,26,0.6)] flex items-center justify-center active:scale-95 transition-transform"
-            aria-label="Open Menu"
-          >
-            <MenuIcon className="w-6 h-6 text-neutral-900 stroke-[2.5]" />
-          </button>
-        </div>
+        {/* Bottom Right: Menu Button */}
+        <button
+          onClick={() => setActiveModal('menu')}
+          className="w-14 h-14 rounded-full bg-gradient-to-b from-[#F5C242] to-[#D9961A] border-2 border-[#FFF0A0] shadow-[0_4px_14px_rgba(217,150,26,0.6)] flex items-center justify-center active:scale-95 transition-transform"
+          aria-label="Open Menu"
+        >
+          <MenuIcon className="w-6 h-6 text-neutral-900 stroke-[2.5]" />
+        </button>
       </div>
 
       {/* ==========================================================================
@@ -2476,33 +3168,17 @@ export default function App() {
       {/* --- CREATE GAME MODAL (WITH 6 BETTING OPTIONS: 50, 100, 200, 500, 1000, 2000) --- */}
       {screen === 'create_game' && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-6 space-y-5 shadow-2xl relative">
-            {/* Modal Header & Floating Close (Requirement 1) */}
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-display font-black text-2xl text-white tracking-tight">
-                  Matchmaking
-                </h3>
-                <span className="text-xs text-neutral-400 font-medium">Select wager and start instant match</span>
-              </div>
-              <button
-                onClick={() => setScreen('gameplay')}
-                className="text-neutral-400 hover:text-white p-2 rounded-xl bg-neutral-800/60 hover:bg-neutral-800 border border-neutral-700/80 transition-all active:scale-95"
-                title="Close"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+          <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-5 space-y-4 shadow-2xl relative">
 
             {/* Player Name Input */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-neutral-300">Your In-Game Name</label>
+            <div className="space-y-1 pt-1">
+              <label className="text-xs font-bold text-neutral-300">Your In-Game Name</label>
               <input
                 type="text"
                 value={playerName}
                 onChange={(e) => setPlayerName(e.target.value)}
                 placeholder="Enter your name"
-                className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-sm text-white font-semibold focus:border-amber-400 focus:outline-none"
+                className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3.5 py-2 text-sm text-white font-semibold focus:border-amber-400 focus:outline-none"
               />
             </div>
 
@@ -2510,7 +3186,6 @@ export default function App() {
             <div className="space-y-2">
               <div className="flex justify-between items-center">
                 <span className="text-xs font-bold text-neutral-200">Select Betting Amount</span>
-                <span className="text-[11px] text-amber-400 font-medium">10% Platform Rake on Total Pot</span>
               </div>
 
               <div className="grid grid-cols-3 gap-2.5">
@@ -2524,27 +3199,22 @@ export default function App() {
                     <div
                       key={amt}
                       onClick={() => setSelectedBet(amt)}
-                      className={`relative cursor-pointer rounded-2xl py-3.5 px-2.5 border transition-all duration-300 flex flex-col justify-between items-center text-center group ${
+                      className={`relative cursor-pointer rounded-2xl py-3 px-2 border transition-all duration-200 flex flex-col justify-center items-center text-center group ${
                         isSelected
-                          ? 'bg-gradient-to-b from-amber-500/25 via-neutral-900 to-amber-950/45 border-amber-400 ring-2 ring-amber-400/50 shadow-lg shadow-amber-500/20 scale-[1.03]'
+                          ? 'bg-gradient-to-b from-amber-500/25 via-neutral-900 to-amber-950/45 border-amber-400 ring-2 ring-amber-400/50 shadow-lg shadow-amber-500/20 scale-[1.02]'
                           : 'bg-neutral-950/80 border-neutral-800 hover:border-neutral-700 hover:bg-neutral-800/50'
                       }`}
                     >
-                      <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider mb-0.5">
-                        Bet
-                      </span>
-
-                      <span className="font-display font-black text-2xl text-white tabular-nums tracking-tight">
+                      <span className="font-display font-black text-xl text-white tabular-nums tracking-tight">
                         ₹{amt}
                       </span>
 
-                      <div className="mt-2 pt-1.5 border-t border-neutral-800/80 w-full text-[11px] text-emerald-400 font-bold flex items-center justify-center gap-1">
-                        <span className="text-neutral-400 font-medium text-[10px]">Win</span>
-                        <span>₹{win}</span>
-                      </div>
+                      <span className="text-[11px] text-emerald-400 font-bold mt-1">
+                        Win ₹{win}
+                      </span>
 
                       {isSelected && (
-                        <div className="absolute top-2 right-2 w-4 h-4 rounded-full bg-amber-400 text-neutral-950 flex items-center justify-center text-[10px] font-black shadow-sm">
+                        <div className="absolute top-2 right-2 w-3.5 h-3.5 rounded-full bg-amber-400 text-neutral-950 flex items-center justify-center text-[9px] font-black shadow-sm">
                           ✓
                         </div>
                       )}
@@ -2554,32 +3224,21 @@ export default function App() {
               </div>
             </div>
 
-            {/* Winner Payout (Requirement 1: Adjusted places and spaces) */}
-            <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-2xl px-4 py-3 flex items-center justify-between text-xs shadow-inner">
-              <span className="text-neutral-300 font-semibold flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                Winner Takes (10% Rake Deducted):
-              </span>
-              <span className="font-display font-black text-xl text-emerald-400 tabular-nums">
-                ₹{(selectedBet * 2) - Math.round(selectedBet * 2 * 0.1)}
-              </span>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex gap-2.5">
+            {/* Action Buttons with Direct Win Amount */}
+            <div className="flex gap-2.5 pt-2">
               <button
                 onClick={() => setScreen('join_game')}
-                className="flex-1 py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors border border-neutral-700"
+                className="flex-1 py-3.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors border border-neutral-700 active:scale-95"
               >
                 <LogIn className="w-4 h-4 text-neutral-300" />
                 Join Existing Room
               </button>
               <button
                 onClick={handleCreateRoom}
-                className="flex-1 py-3 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-yellow-500 hover:from-amber-300 hover:to-amber-400 text-neutral-950 font-black text-xs flex items-center justify-center gap-1.5 transition-all shadow-lg shadow-amber-500/20 active:scale-95"
+                className="flex-1 py-3.5 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-yellow-500 hover:from-amber-300 hover:to-amber-400 text-neutral-950 font-black text-xs flex items-center justify-center gap-1.5 transition-all shadow-lg shadow-amber-500/20 active:scale-95"
               >
                 <Play className="w-4 h-4 fill-current" />
-                Generate Room
+                <span>Generate Room · Win ₹{(selectedBet * 2) - Math.round(selectedBet * 2 * 0.1)}</span>
               </button>
             </div>
           </div>
@@ -2668,10 +3327,14 @@ export default function App() {
             {/* Start Match CTA */}
             <div className="space-y-2">
               <button
-                onClick={() => startMatchWithBet(activeRoom)}
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-neutral-950 font-black text-xs shadow-lg transition-all active:scale-95"
+                onClick={() => {
+                  setOpponentName('Computer');
+                  startMatchWithBet({ ...activeRoom, opponentName: 'Computer' });
+                }}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-neutral-950 font-black text-sm shadow-lg shadow-emerald-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
               >
-                Play with Online Challenger Now (₹{activeRoom.betAmount})
+                <Play className="w-4 h-4 fill-current" />
+                Play With Computer
               </button>
               <button
                 onClick={() => setScreen('create_game')}
@@ -2721,34 +3384,6 @@ export default function App() {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <span className="text-xs font-bold text-neutral-300 block">Available Open Rooms</span>
-              <div className="space-y-2 max-h-36 overflow-y-auto pr-1">
-                {[
-                  { id: 'CR-8219', host: 'Kavita_Pro', bet: 200 },
-                  { id: 'CR-3944', host: 'Vikram_Ace', bet: 500 },
-                  { id: 'CR-7102', host: 'Samir_King', bet: 1000 },
-                ].map((r) => (
-                  <div
-                    key={r.id}
-                    onClick={() => {
-                      setJoinCodeInput(r.id);
-                      setSelectedBet(r.bet);
-                    }}
-                    className="p-2.5 rounded-xl bg-neutral-950/70 border border-neutral-800 hover:border-amber-500/60 cursor-pointer flex items-center justify-between text-xs transition-colors"
-                  >
-                    <div>
-                      <span className="font-bold text-white block">{r.host}</span>
-                      <span className="text-[10px] text-amber-400 font-mono">{r.id}</span>
-                    </div>
-                    <div className="text-right">
-                      <span className="font-bold text-emerald-400 block">Bet ₹{r.bet}</span>
-                      <span className="text-[10px] text-neutral-400">Pot ₹{r.bet * 2}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
 
             <div className="flex gap-2">
               <button
@@ -2831,20 +3466,18 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => setActiveModal('rules')}
-                className="w-full py-2.5 px-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-xs font-semibold text-neutral-200 flex items-center justify-between transition-colors"
+                onClick={() => setActiveModal('confirm_leave')}
+                className="w-full py-2.5 px-3 bg-red-950/40 hover:bg-red-900/50 border border-red-800/50 rounded-xl text-xs font-semibold text-red-300 flex items-center justify-between transition-colors"
               >
                 <span className="flex items-center gap-2">
-                  <HelpCircle className="w-4 h-4 text-amber-400" />
-                  Carrom Rules & Queen Cover
+                  <LogOut className="w-4 h-4 text-red-400" />
+                  Leave Game
                 </span>
+                <span className="text-red-400/80 text-[10px]">Exit to Lobby</span>
               </button>
 
               <button
-                onClick={() => {
-                  initializeBoard();
-                  setActiveModal(null);
-                }}
+                onClick={() => initiateRestartOrRematch('restart')}
                 className="w-full py-2.5 px-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-xs font-semibold text-neutral-200 flex items-center justify-between transition-colors"
               >
                 <span className="flex items-center gap-2">
@@ -2985,70 +3618,213 @@ export default function App() {
         </div>
       )}
 
-      {/* --- RULE 7: GAME OVER & WINNER/LOSER MODAL --- */}
-      {gameOverResult && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-sm w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-center space-y-4 shadow-2xl relative">
-            <div className="w-16 h-16 mx-auto rounded-full bg-neutral-800 border-2 border-amber-400 flex items-center justify-center text-3xl shadow-lg">
-              {gameOverResult.winner === 'player' ? '🏆' : '💔'}
+      {/* --- CONFIRM LEAVE GAME MODAL (REQUIREMENT 4: RECONFIRM DECISION) --- */}
+      {activeModal === 'confirm_leave' && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="max-w-xs w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-5 space-y-4 shadow-2xl relative text-center">
+            <div className="w-14 h-14 mx-auto rounded-full bg-red-950/60 border border-red-500/40 flex items-center justify-center text-red-400 shadow-lg">
+              <LogOut className="w-7 h-7" />
             </div>
 
             <div className="space-y-1">
-              <h2 className="text-2xl font-display font-black text-white">
-                {gameOverResult.winner === 'player' ? 'Winner Declared!' : 'Match Finished'}
-              </h2>
-              <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs space-y-1 mt-2">
-                <div className="flex justify-between font-bold">
-                  <span className="text-emerald-400">🏆 Winner</span>
-                  <span className="text-white">{gameOverResult.winnerName} (Pocketed 9 Coins)</span>
-                </div>
-                <div className="flex justify-between text-neutral-400">
-                  <span className="text-red-400">Loser</span>
-                  <span>{gameOverResult.loserName}</span>
-                </div>
-              </div>
+              <h3 className="font-display font-black text-xl text-white">Leave Match?</h3>
+              <p className="text-xs text-neutral-300">
+                Are you sure you want to abandon this match? Any wager placed for this room will be forfeited.
+              </p>
             </div>
 
-            {/* Payout Breakdown */}
-            <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-3.5 text-xs text-left space-y-1.5">
-              <div className="flex justify-between text-neutral-400">
-                <span>Room Code</span>
-                <span className="font-mono text-white">{activeRoom.gameId}</span>
-              </div>
-              <div className="flex justify-between text-neutral-400">
-                <span>Total Match Pot</span>
-                <span className="text-white font-bold">₹{activeRoom.totalPot}</span>
-              </div>
-              <div className="flex justify-between text-neutral-500">
-                <span>10% Platform Charge</span>
-                <span>-₹{activeRoom.platformRake}</span>
-              </div>
-              <div className="border-t border-neutral-800 pt-1.5 flex justify-between font-bold text-sm text-emerald-400">
-                <span>Winner Payout Credited</span>
-                <span>+₹{activeRoom.winnerPrize}</span>
-              </div>
-            </div>
-
-            <div className="flex gap-2">
+            <div className="space-y-2 pt-1">
               <button
                 onClick={() => {
+                  setActiveModal(null);
                   setGameOverResult(null);
                   setScreen('create_game');
                 }}
-                className="flex-1 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-bold text-xs"
+                className="w-full py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition-colors shadow-lg shadow-red-600/20 active:scale-95"
               >
-                Change Bet
+                Yes, Leave Game
               </button>
               <button
-                onClick={() => {
-                  setGameOverResult(null);
-                  startMatchWithBet(activeRoom);
-                }}
-                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-neutral-950 font-black text-xs transition-colors"
+                onClick={() => setActiveModal(null)}
+                className="w-full py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs transition-colors active:scale-95"
               >
-                Rematch (₹{activeRoom.betAmount})
+                Cancel & Keep Playing
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- REQUIREMENT 5: WINNER & LOSER DECLARATION (NO EMOJIS, FIRECRACKERS ON WIN, LOSING ANIMATION ON DEFEAT) --- */}
+      {gameOverResult && (
+        <>
+          {gameOverResult.winner === 'player' ? (
+            <FirecrackerCelebration />
+          ) : (
+            <DefeatAnimation />
+          )}
+
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+            <div
+              className={`max-w-sm w-full bg-neutral-900 border rounded-3xl p-6 text-center space-y-4 shadow-2xl relative ${
+                gameOverResult.winner === 'player'
+                  ? 'border-amber-400/80 shadow-[0_0_50px_rgba(245,158,11,0.25)]'
+                  : 'border-rose-900/80 shadow-[0_0_50px_rgba(225,29,72,0.15)]'
+              }`}
+            >
+              {/* Header Icon Badge (No Emojis Strictly) */}
+              <div
+                className={`w-16 h-16 mx-auto rounded-full flex items-center justify-center border-2 shadow-xl ${
+                  gameOverResult.winner === 'player'
+                    ? 'bg-gradient-to-tr from-amber-600/30 via-yellow-400/20 to-amber-950/60 border-amber-400 text-amber-300'
+                    : 'bg-gradient-to-tr from-rose-950/60 via-red-900/30 to-black/80 border-rose-500/60 text-rose-400'
+                }`}
+              >
+                {gameOverResult.winner === 'player' ? (
+                  <Award className="w-8 h-8 stroke-[2.2]" />
+                ) : (
+                  <ShieldAlert className="w-8 h-8 stroke-[2.2]" />
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <span
+                  className={`text-[10px] font-black uppercase tracking-widest px-3 py-0.5 rounded-full border inline-block ${
+                    gameOverResult.winner === 'player'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/40'
+                      : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                  }`}
+                >
+                  {gameOverResult.winner === 'player' ? 'Match Champion' : 'Match Concluded'}
+                </span>
+
+                <h2 className="text-2xl font-display font-black text-white tracking-tight">
+                  {gameOverResult.winner === 'player' ? 'Victory Declared!' : 'Better Luck Next Time'}
+                </h2>
+
+                <p className="text-xs text-neutral-300">
+                  {gameOverResult.winner === 'player'
+                    ? `${gameOverResult.winnerName} pocketed all 9 White coins first!`
+                    : `${gameOverResult.winnerName} pocketed all 9 Black coins first.`}
+                </p>
+              </div>
+
+              {/* Match Score & Rake Breakdown */}
+              <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-4 text-xs text-left space-y-2">
+                <div className="flex justify-between items-center text-neutral-400">
+                  <span>Room ID</span>
+                  <span className="font-mono text-white font-bold">{activeRoom.gameId}</span>
+                </div>
+
+                <div className="flex justify-between items-center text-neutral-400">
+                  <span>Match Total Pot</span>
+                  <span className="text-white font-bold">₹{activeRoom.totalPot}</span>
+                </div>
+
+                <div className="flex justify-between items-center text-neutral-500 text-[11px]">
+                  <span>10% Platform Rake</span>
+                  <span>-₹{activeRoom.platformRake}</span>
+                </div>
+
+                <div className="border-t border-neutral-800 pt-2 flex justify-between items-center font-bold text-sm">
+                  <span className={gameOverResult.winner === 'player' ? 'text-emerald-400' : 'text-neutral-400'}>
+                    {gameOverResult.winner === 'player' ? 'Net Payout Credited' : 'Match Stake'}
+                  </span>
+                  <span className={gameOverResult.winner === 'player' ? 'text-emerald-400 text-base' : 'text-rose-400'}>
+                    {gameOverResult.winner === 'player' ? `+₹${activeRoom.winnerPrize}` : `-₹${activeRoom.betAmount}`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={() => {
+                    setGameOverResult(null);
+                    setScreen('create_game');
+                  }}
+                  className="flex-1 py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-bold text-xs transition-colors"
+                >
+                  Change Bet / Lobby
+                </button>
+                <button
+                  onClick={() => initiateRestartOrRematch('rematch')}
+                  className="flex-1 py-3 rounded-xl bg-gradient-to-r from-amber-400 via-amber-500 to-yellow-500 hover:from-amber-300 hover:to-amber-400 text-neutral-950 font-black text-xs transition-all shadow-lg shadow-amber-500/20 active:scale-95"
+                >
+                  Rematch (₹{activeRoom.betAmount})
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* --- REQUIREMENT 2 & 9: REMATCH / RESTART OPPONENT APPROVE / REJECT MODAL --- */}
+      {rematchPrompt && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="max-w-sm w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-center space-y-4 shadow-2xl relative">
+            {rematchPrompt.status === 'requesting' && (
+              <>
+                <div className="w-14 h-14 mx-auto rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-md">
+                  <RotateCcw className="w-7 h-7 animate-spin" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-display font-black text-xl text-white">
+                    {rematchPrompt.type === 'rematch' ? 'Rematch Requested' : 'Restart Requested'}
+                  </h3>
+                  <p className="text-xs text-neutral-300">
+                    Waiting for <span className="font-bold text-amber-400">{opponentName || 'Computer'}</span> to review and decide your {rematchPrompt.type === 'rematch' ? 'rematch' : 'restart'} request...
+                  </p>
+                </div>
+
+                {/* Opponent Decision Banner (Exclusive to Opponent/Computer - Player cannot choose) */}
+                <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-3.5 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-center gap-2 text-amber-400">
+                    <div className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                    <span className="text-[11px] font-bold uppercase tracking-wider">
+                      {opponentName || 'Computer'} is deciding...
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-neutral-400 block">
+                    Opponent holds exclusive approval authority for match restarts and rematches.
+                  </span>
+                </div>
+              </>
+            )}
+
+            {rematchPrompt.status === 'approved' && (
+              <>
+                <div className="w-14 h-14 mx-auto rounded-full bg-emerald-500/20 border border-emerald-500/50 flex items-center justify-center text-emerald-400 text-2xl font-black">
+                  ✓
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-display font-black text-xl text-emerald-400">Request Approved!</h3>
+                  <p className="text-xs text-neutral-300">
+                    <span className="font-bold text-white">{opponentName || 'Computer'}</span> approved the {rematchPrompt.type === 'rematch' ? 'rematch' : 'restart'}.
+                  </p>
+                  <p className="text-[11px] text-amber-400 font-semibold animate-pulse pt-1">
+                    Starting fresh match with same player and bet...
+                  </p>
+                </div>
+              </>
+            )}
+
+            {rematchPrompt.status === 'declined' && (
+              <>
+                <div className="w-14 h-14 mx-auto rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center text-red-400 text-2xl font-black">
+                  ✕
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-display font-black text-xl text-red-400">Request Declined</h3>
+                  <p className="text-xs text-neutral-300">
+                    <span className="font-bold text-white">{opponentName || 'Computer'}</span> declined the {rematchPrompt.type === 'rematch' ? 'rematch' : 'restart'} request.
+                  </p>
+                  <p className="text-[11px] text-neutral-400 pt-1">
+                    Returning to betting amount selection...
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
