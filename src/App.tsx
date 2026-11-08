@@ -33,8 +33,23 @@ import {
   ArrowRight,
   ShieldAlert,
   Award,
-  LogOut
+  LogOut,
+  Shield,
+  ArrowUpRight,
+  ArrowDownLeft,
+  QrCode
 } from 'lucide-react';
+
+import { AdminPanel } from './components/AdminPanel';
+import { DepositPaymentPage } from './components/DepositPaymentPage';
+import {
+  checkIsAdminUrl,
+  subscribeToSync,
+  submitWithdrawalRequest,
+  getWithdrawalRequests,
+  getAdminDepositConfig,
+  WithdrawalRequest
+} from './services/adminSync';
 
 /* ==========================================================================
    WEB AUDIO API PROCEDURAL SOUND ENGINE
@@ -366,15 +381,12 @@ interface FloatingScore {
 
 interface WalletState {
   realBalance: number;
-  bonusBalance: number;
-  wagerRequired: number;
-  wagerCompleted: number;
   totalWon: number;
   matchesPlayed: number;
   matchesWon: number;
   transactions: Array<{
     id: string;
-    type: 'deposit' | 'withdrawal' | 'entry' | 'win' | 'bonus_unlock';
+    type: 'deposit' | 'withdrawal' | 'entry' | 'win';
     amount: number;
     description: string;
     timestamp: number;
@@ -384,9 +396,6 @@ interface WalletState {
 
 const DEFAULT_WALLET: WalletState = {
   realBalance: 1000,
-  bonusBalance: 200,
-  wagerRequired: 600,
-  wagerCompleted: 0,
   totalWon: 0,
   matchesPlayed: 0,
   matchesWon: 0,
@@ -396,14 +405,6 @@ const DEFAULT_WALLET: WalletState = {
       type: 'deposit',
       amount: 1000,
       description: 'Initial Real Balance',
-      timestamp: Date.now() - 3600000,
-      status: 'success',
-    },
-    {
-      id: 'TXN-INIT-002',
-      type: 'deposit',
-      amount: 200,
-      description: 'Promotional Welcome Bonus (3x Wager)',
       timestamp: Date.now() - 3600000,
       status: 'success',
     },
@@ -742,6 +743,21 @@ export default function App() {
 
   const [soundMuted, setSoundMuted] = useState(false);
 
+  // Admin Panel, Deposit Config & Deposit Payment Page state
+  const [adminConfig, setAdminConfig] = useState(getAdminDepositConfig);
+  const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [depositPaymentAmount, setDepositPaymentAmount] = useState<number | null>(null);
+  const [customDepositInput, setCustomDepositInput] = useState<string>('');
+
+  // Custom Withdrawal form state
+  const [customWithdrawAmount, setCustomWithdrawAmount] = useState<string>('');
+  const [playerWithdrawUpi, setPlayerWithdrawUpi] = useState<string>('');
+  const [withdrawSuccessMsg, setWithdrawSuccessMsg] = useState<string | null>(null);
+  const [withdrawErrorMsg, setWithdrawErrorMsg] = useState<string | null>(null);
+  const [recentWithdrawals, setRecentWithdrawals] = useState<WithdrawalRequest[]>(() => {
+    return getWithdrawalRequests().filter((r) => r.playerName === playerName);
+  });
+
   // Quick Chat message bubble
   const [chatMessage, setChatMessage] = useState<{ text: string; sender: 'player' | 'bot' } | null>(null);
 
@@ -858,6 +874,43 @@ export default function App() {
   useEffect(() => {
     currentTurnRef.current = currentTurn;
   }, [currentTurn]);
+
+  // URL route detection for Admin Panel (/admin9999, /Admin9999, etc.) & real-time sync
+  useEffect(() => {
+    const handleCheckUrl = () => {
+      if (checkIsAdminUrl()) {
+        setIsAdminOpen(true);
+      }
+    };
+
+    handleCheckUrl();
+    window.addEventListener('popstate', handleCheckUrl);
+    window.addEventListener('hashchange', handleCheckUrl);
+
+    const unsubscribe = subscribeToSync((msg) => {
+      if (msg.type === 'DEPOSIT_CONFIG_UPDATED') {
+        setAdminConfig(getAdminDepositConfig());
+      } else if (
+        msg.type === 'WALLET_UPDATED' ||
+        msg.type === 'WITHDRAWAL_STATUS_UPDATED' ||
+        msg.type === 'DEPOSIT_STATUS_UPDATED'
+      ) {
+        const saved = localStorage.getItem('carrom_royal_wallet');
+        if (saved) {
+          try {
+            setWallet(JSON.parse(saved));
+          } catch {}
+        }
+        setRecentWithdrawals(getWithdrawalRequests().filter((r) => r.playerName === playerName));
+      }
+    });
+
+    return () => {
+      window.removeEventListener('popstate', handleCheckUrl);
+      window.removeEventListener('hashchange', handleCheckUrl);
+      unsubscribe();
+    };
+  }, [playerName]);
 
   /* ==========================================================================
      SPAWN PARTICLES & FLOATING TEXTS
@@ -1096,7 +1149,6 @@ export default function App() {
         ...prev,
         realBalance: Math.max(0, prev.realBalance - room.betAmount),
         matchesPlayed: prev.matchesPlayed + 1,
-        wagerCompleted: prev.wagerCompleted + room.betAmount,
         transactions: [
           {
             id: `TXN-ENTRY-${Date.now().toString().slice(-6)}`,
@@ -2874,48 +2926,53 @@ export default function App() {
   /* ==========================================================================
      WALLET DEPOSIT & WITHDRAW HANDLERS
      ========================================================================== */
-  const handleDeposit = (amount: number) => {
-    const bonusEarned = Math.round(amount * 0.2);
-    setWallet((prev) => ({
-      ...prev,
-      realBalance: prev.realBalance + amount,
-      bonusBalance: prev.bonusBalance + bonusEarned,
-      wagerRequired: prev.wagerRequired + bonusEarned * 3,
-      transactions: [
-        {
-          id: `TXN-DEP-${Date.now().toString().slice(-6)}`,
-          type: 'deposit',
-          amount,
-          description: `UPI Instant Deposit (+₹${bonusEarned} Bonus)`,
-          timestamp: Date.now(),
-          status: 'success',
-        },
-        ...prev.transactions,
-      ],
-    }));
-    soundEngine.playPocketSink(true);
+  const handleStartDepositPayment = (amount: number) => {
+    setDepositPaymentAmount(amount);
     setActiveModal(null);
   };
 
-  const handleWithdrawal = (amount: number) => {
-    if (amount < 500 || amount > wallet.realBalance) return;
-    setWallet((prev) => ({
-      ...prev,
-      realBalance: prev.realBalance - amount,
-      transactions: [
-        {
-          id: `TXN-WTH-${Date.now().toString().slice(-6)}`,
-          type: 'withdrawal',
-          amount,
-          description: `IMPS Instant Payout`,
-          timestamp: Date.now(),
-          status: 'success',
-        },
-        ...prev.transactions,
-      ],
-    }));
-    soundEngine.playCoinClack(1);
-    setActiveModal(null);
+  const handleCustomWithdrawalSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setWithdrawErrorMsg(null);
+    setWithdrawSuccessMsg(null);
+
+    const amt = parseFloat(customWithdrawAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setWithdrawErrorMsg('Please enter a valid withdrawal amount.');
+      return;
+    }
+
+    const minWithdrawal = adminConfig.minWithdrawal ?? 500;
+    if (amt < minWithdrawal) {
+      setWithdrawErrorMsg(`Minimum withdrawal amount is ₹${minWithdrawal}.`);
+      return;
+    }
+
+    if (amt > wallet.realBalance) {
+      setWithdrawErrorMsg(`Cannot withdraw more than your withdrawable balance (₹${wallet.realBalance}).`);
+      return;
+    }
+
+    const upi = playerWithdrawUpi.trim();
+    if (!upi || !upi.includes('@')) {
+      setWithdrawErrorMsg('Please enter a valid player UPI ID (e.g. yourname@okaxis).');
+      return;
+    }
+
+    const res = submitWithdrawalRequest({
+      playerName: playerName.trim() || 'Player',
+      amount: amt,
+      playerUpi: upi,
+    });
+
+    if (res.success) {
+      soundEngine.playCoinClack(1);
+      setWithdrawSuccessMsg(`Withdrawal of ₹${amt} requested! Sent to Admin for manual payout to ${upi}.`);
+      setCustomWithdrawAmount('');
+      setRecentWithdrawals(getWithdrawalRequests().filter((r) => r.playerName === playerName));
+    } else {
+      setWithdrawErrorMsg(res.error || 'Failed to submit withdrawal request.');
+    }
   };
 
   /* ==========================================================================
@@ -3169,7 +3226,6 @@ export default function App() {
       {screen === 'create_game' && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-5 space-y-4 shadow-2xl relative">
-
             {/* Player Name Input */}
             <div className="space-y-1 pt-1">
               <label className="text-xs font-bold text-neutral-300">Your In-Game Name</label>
@@ -3527,70 +3583,234 @@ export default function App() {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="font-display font-bold text-lg text-white">Deposit Cash</h3>
-                <p className="text-xs text-neutral-400">Instant UPI Deposit with 20% Promotional Bonus</p>
+                <p className="text-xs text-neutral-400">Select amount to view Admin UPI QR & Payment Details</p>
               </div>
               <button onClick={() => setActiveModal(null)} className="text-neutral-400 hover:text-white">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="grid grid-cols-4 gap-2">
-              {[200, 500, 1000, 2000].map((amt) => (
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-semibold text-neutral-300">Select Deposit Amount</span>
+                <span className="text-[10px] text-amber-400 font-medium">Min: ₹{adminConfig.minDeposit ?? 200}</span>
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                {Array.from(new Set([
+                  adminConfig.minDeposit ?? 200,
+                  Math.max(500, (adminConfig.minDeposit ?? 200) * 2),
+                  Math.max(1000, (adminConfig.minDeposit ?? 200) * 5),
+                  Math.max(2000, (adminConfig.minDeposit ?? 200) * 10),
+                ])).map((amt) => (
+                  <button
+                    key={amt}
+                    onClick={() => handleStartDepositPayment(amt)}
+                    className="p-3 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 hover:border-amber-400/60 rounded-xl text-center transition-all group active:scale-95"
+                  >
+                    <span className="block font-bold text-sm text-white group-hover:text-amber-400">₹{amt}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom Deposit Amount Option */}
+            <div className="pt-2 border-t border-neutral-800/80 space-y-2">
+              <span className="text-xs font-semibold text-neutral-300">Or Type Custom Amount</span>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500 font-bold text-sm">₹</span>
+                  <input
+                    type="number"
+                    min={adminConfig.minDeposit ?? 200}
+                    step="50"
+                    value={customDepositInput}
+                    onChange={(e) => setCustomDepositInput(e.target.value)}
+                    placeholder={`Enter amount (min ₹${adminConfig.minDeposit ?? 200})`}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-xl pl-8 pr-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                  />
+                </div>
                 <button
-                  key={amt}
-                  onClick={() => handleDeposit(amt)}
-                  className="p-3 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-xl text-center transition-all group"
+                  type="button"
+                  onClick={() => {
+                    const amt = parseFloat(customDepositInput);
+                    const minDep = adminConfig.minDeposit ?? 200;
+                    if (amt >= minDep) handleStartDepositPayment(amt);
+                  }}
+                  disabled={!customDepositInput || parseFloat(customDepositInput) < (adminConfig.minDeposit ?? 200)}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-neutral-950 font-bold text-xs rounded-xl transition-colors"
                 >
-                  <span className="block font-bold text-sm text-white group-hover:text-amber-400">₹{amt}</span>
-                  <span className="block text-[10px] text-emerald-400 font-semibold">+₹{Math.round(amt * 0.2)}</span>
+                  Proceed
                 </button>
-              ))}
+              </div>
             </div>
 
             <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs text-neutral-400 space-y-1">
               <span className="block font-semibold text-neutral-300 text-[11px]">Instant UPI Gateways</span>
-              <p className="text-[10px]">Google Pay · PhonePe · Paytm · NetBanking</p>
+              <p className="text-[10px]">Google Pay · PhonePe · Paytm · NetBanking · Cred · BHIM</p>
             </div>
           </div>
         </div>
       )}
 
-      {/* --- WITHDRAW MODAL --- */}
+      {/* --- WITHDRAW MODAL (CUSTOM AMOUNT BETWEEN WITHDRAWABLE BALANCE & PLAYER UPI ID) --- */}
       {activeModal === 'withdraw' && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-2xl p-6 space-y-4 shadow-2xl relative">
+          <div className="max-w-md w-full bg-neutral-900 border border-neutral-800 rounded-2xl p-6 space-y-4 shadow-2xl relative max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="font-display font-bold text-lg text-white">Withdraw Funds</h3>
-                <p className="text-xs text-neutral-400">Direct Bank IMPS / UPI Transfer</p>
+                <p className="text-xs text-neutral-400">Direct Manual UPI Transfer to Your Account</p>
               </div>
-              <button onClick={() => setActiveModal(null)} className="text-neutral-400 hover:text-white">
+              <button
+                onClick={() => {
+                  setActiveModal(null);
+                  setWithdrawErrorMsg(null);
+                  setWithdrawSuccessMsg(null);
+                }}
+                className="text-neutral-400 hover:text-white"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs space-y-1.5">
-              <div className="flex justify-between">
+              <div className="flex justify-between items-center">
                 <span className="text-neutral-400">Withdrawable Balance</span>
-                <span className="font-bold text-emerald-400 text-sm">₹{wallet.realBalance}</span>
+                <span className="font-bold text-emerald-400 text-base tabular-nums">₹{wallet.realBalance}</span>
               </div>
-              <div className="flex justify-between text-neutral-500 text-[10px]">
-                <span>Minimum Withdrawal</span>
-                <span>₹500</span>
+              <div className="flex justify-between items-center text-[10px] text-neutral-400 pt-0.5 border-t border-neutral-800/60">
+                <span>Min Withdrawal: <strong className="text-amber-400 font-semibold">₹{adminConfig.minWithdrawal ?? 500}</strong></span>
+                <span>Max: ₹{wallet.realBalance}</span>
               </div>
             </div>
 
-            {wallet.realBalance >= 500 ? (
+            {withdrawSuccessMsg && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 text-xs flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>{withdrawSuccessMsg}</span>
+              </div>
+            )}
+
+            {withdrawErrorMsg && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{withdrawErrorMsg}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCustomWithdrawalSubmit} className="space-y-3.5">
+              {/* Custom Amount between withdrawable balance */}
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-xs font-semibold text-neutral-300">
+                    Withdrawal Amount (₹) <span className="text-rose-400">*</span>
+                  </label>
+                  <span className="text-[10px] text-neutral-500">
+                    Min: ₹{adminConfig.minWithdrawal ?? 500}
+                  </span>
+                </div>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500 font-bold text-sm">₹</span>
+                  <input
+                    type="number"
+                    min={adminConfig.minWithdrawal ?? 500}
+                    max={wallet.realBalance}
+                    step="1"
+                    value={customWithdrawAmount}
+                    onChange={(e) => setCustomWithdrawAmount(e.target.value)}
+                    placeholder={`Type amount between ${adminConfig.minWithdrawal ?? 500} and ${wallet.realBalance}`}
+                    className="w-full bg-neutral-950 border border-neutral-700 rounded-xl pl-8 pr-3 py-2.5 text-sm font-semibold text-white focus:outline-none focus:border-emerald-500"
+                    required
+                  />
+                </div>
+
+                {/* Quick Chips */}
+                {wallet.realBalance >= (adminConfig.minWithdrawal ?? 500) && (
+                  <div className="flex gap-1.5 mt-2">
+                    {Array.from(new Set([
+                      adminConfig.minWithdrawal ?? 500,
+                      (adminConfig.minWithdrawal ?? 500) * 2,
+                      Math.floor(wallet.realBalance * 0.5),
+                      wallet.realBalance,
+                    ]))
+                      .filter((val) => val >= (adminConfig.minWithdrawal ?? 500) && val <= wallet.realBalance)
+                      .map((chipVal, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setCustomWithdrawAmount(chipVal.toString())}
+                          className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 rounded-lg text-[11px] font-semibold text-neutral-300 transition-colors"
+                        >
+                          {chipVal === wallet.realBalance ? 'Max' : `₹${chipVal}`}
+                        </button>
+                      ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Player UPI ID input below the amount */}
+              <div>
+                <label className="block text-xs font-semibold text-neutral-300 mb-1">
+                  Your UPI ID for Payout <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={playerWithdrawUpi}
+                  onChange={(e) => setPlayerWithdrawUpi(e.target.value)}
+                  placeholder="e.g. yourname@okaxis, 9876543210@paytm"
+                  className="w-full bg-neutral-950 border border-neutral-700 rounded-xl px-3.5 py-2.5 text-sm font-mono text-white focus:outline-none focus:border-emerald-500"
+                  required
+                />
+                <p className="text-[10px] text-neutral-500 mt-1">
+                  Your UPI ID will be displayed in the Admin Panel for manual payout.
+                </p>
+              </div>
+
               <button
-                onClick={() => handleWithdrawal(500)}
-                className="w-full py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs transition-colors"
+                type="submit"
+                disabled={wallet.realBalance < (adminConfig.minWithdrawal ?? 500)}
+                className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-neutral-950 font-bold text-xs transition-colors shadow-lg shadow-emerald-500/20"
               >
-                Withdraw ₹500 via IMPS
+                Request Withdrawal via UPI
               </button>
-            ) : (
-              <p className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 p-2.5 rounded-lg">
-                Threshold not met. Win a few more matches to reach ₹500!
-              </p>
+            </form>
+
+            {/* Recent Withdrawals List */}
+            {recentWithdrawals.length > 0 && (
+              <div className="pt-2 border-t border-neutral-800/80 space-y-2">
+                <span className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider block">
+                  Your Withdrawal Requests (Live Synced)
+                </span>
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {recentWithdrawals.slice(0, 5).map((w) => (
+                    <div
+                      key={w.id}
+                      className="bg-neutral-950 border border-neutral-800/80 rounded-xl p-2.5 flex items-center justify-between text-xs"
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-white">₹{w.amount}</span>
+                          <span className="font-mono text-[10px] text-neutral-400">({w.playerUpi})</span>
+                        </div>
+                        <span className="text-[10px] text-neutral-500">
+                          {new Date(w.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                          w.status === 'completed'
+                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                            : w.status === 'rejected'
+                            ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
+                            : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                        }`}
+                      >
+                        {w.status === 'completed' ? 'Paid' : w.status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -3827,6 +4047,28 @@ export default function App() {
             )}
           </div>
         </div>
+      )}
+
+      {/* --- DEPOSIT PAYMENT PAGE (WHEN AMOUNT IS CLICKED) --- */}
+      {depositPaymentAmount !== null && (
+        <DepositPaymentPage
+          amount={depositPaymentAmount}
+          playerName={playerName}
+          onBack={() => setDepositPaymentAmount(null)}
+          onSuccessReturn={() => setDepositPaymentAmount(null)}
+        />
+      )}
+
+      {/* --- ADMIN PANEL MODAL (ACCESSIBLE VIA URL OR SHORTCUT) --- */}
+      {isAdminOpen && (
+        <AdminPanel
+          onClose={() => {
+            setIsAdminOpen(false);
+            if (window.location.hash.toLowerCase().includes('admin')) {
+              history.pushState(null, '', window.location.pathname);
+            }
+          }}
+        />
       )}
     </div>
   );
