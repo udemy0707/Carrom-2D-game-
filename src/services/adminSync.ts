@@ -251,11 +251,11 @@ export const DEFAULT_DEPOSIT_CONFIG: AdminDepositConfig = {
   updatedAt: Date.now(),
 };
 
-// Default Fallback Admin Security (Initial Server State)
+// Initial Security State (Fully Synced Server-Side via Firestore)
 export const DEFAULT_SECURITY: AdminSecurityConfig = {
-  username: 'admin',
-  passwordHash: 'admin123',
-  urlSlug: 'admin',
+  username: '',
+  passwordHash: '',
+  urlSlug: '',
 };
 
 // Broadcast Channel for Local Instant Sync
@@ -1207,19 +1207,20 @@ export function checkIsAdminUrl(): boolean {
   if (typeof window === 'undefined') return false;
 
   const security = getAdminSecurity();
-  const configuredSlug = (security.urlSlug || 'admin').toLowerCase();
+  const configuredSlug = (security.urlSlug || '').toLowerCase().trim();
+  if (!configuredSlug) return false;
 
-  const path = window.location.pathname.toLowerCase().replace(/^\/+|\/+$/g, '');
-  const hash = window.location.hash.toLowerCase().replace(/^#\/?|\/+$/g, '');
+  const path = window.location.pathname.toLowerCase();
+  const hash = window.location.hash.toLowerCase();
   const search = window.location.search.toLowerCase();
 
-  if (path === configuredSlug) return true;
-  if (hash === configuredSlug) return true;
-  if (search.includes(configuredSlug) || search.includes(`admin`)) {
-    if (search.includes(`route=${configuredSlug}`) || search.includes(configuredSlug)) {
-      return true;
-    }
-  }
+  const pathSegments = path.split('/').filter(Boolean);
+  const hashSegments = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+
+  // Match ONLY the dynamically configured server-side URL slug from Firestore
+  if (pathSegments.includes(configuredSlug)) return true;
+  if (hashSegments.includes(configuredSlug)) return true;
+  if (search.includes(configuredSlug)) return true;
 
   return false;
 }

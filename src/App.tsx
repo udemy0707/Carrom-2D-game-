@@ -872,6 +872,13 @@ export default function App() {
   const [depositPaymentAmount, setDepositPaymentAmount] = useState<number | null>(null);
   const [customDepositInput, setCustomDepositInput] = useState<string>('');
 
+  // Local Player Role ('host' | 'guest') - Explicit role tracking for cross-device multiplayer
+  const [localRole, setLocalRole] = useState<'host' | 'guest'>('host');
+  const localRoleRef = useRef<'host' | 'guest'>('host');
+  useEffect(() => {
+    localRoleRef.current = localRole;
+  }, [localRole]);
+
   // Custom Withdrawal form state
   const [customWithdrawAmount, setCustomWithdrawAmount] = useState<string>('');
   const [playerWithdrawUpi, setPlayerWithdrawUpi] = useState<string>('');
@@ -1136,9 +1143,12 @@ export default function App() {
     });
   }, []);
 
-  // Reset idle timer upon player response or movement (Requirement 2)
+  // Reset countdown timer & turn deadline upon player response or movement
   const notifyActivity = useCallback(() => {
+    const newDeadline = Date.now() + 20000;
     lastActivityTimeRef.current = Date.now();
+    authoritativeDeadlineRef.current = newDeadline;
+    lastTickedSecondRef.current = -1;
     setIdleSeconds(0);
     setTurnTimeLeft(20);
   }, []);
@@ -1440,6 +1450,8 @@ export default function App() {
     try {
       setIsCreatingRoom(true);
       setMatchmakingMode('PRIVATE_ROOM');
+      setLocalRole('host');
+      localRoleRef.current = 'host';
       const serverRoom = await createMultiplayerRoom(playerName, selectedBet);
       console.log(`[HOST] Room created: ${serverRoom.roomId}`);
       const newRoom: GameRoom = {
@@ -1526,6 +1538,8 @@ export default function App() {
     try {
       setIsJoiningRoom(true);
       setMatchmakingMode('PRIVATE_ROOM');
+      setLocalRole('guest');
+      localRoleRef.current = 'guest';
       console.log(`[JOINER] Entered Room ID: ${code}`);
 
       const res = await joinMultiplayerRoom(code, playerName);
@@ -1577,7 +1591,7 @@ export default function App() {
           ? JSON.parse(serverRoom.gameState)
           : serverRoom.gameState;
 
-        const isLocalHost = activeRoom.hostName === playerName;
+        const isHost = localRoleRef.current === 'host';
 
         // 1. Sync turn deadline
         if (parsed.turnDeadline) {
@@ -1586,33 +1600,45 @@ export default function App() {
 
         // 2. Sync turn & trigger smooth striker return animation on turn transition
         if (parsed.currentTurn) {
-          const isHostTurn = parsed.currentTurn === 'host';
-          const isMyTurn = isLocalHost ? isHostTurn : !isHostTurn;
+          const isMyTurn = parsed.currentTurn === localRoleRef.current;
           const newTurn: 'player' | 'bot' = isMyTurn ? 'player' : 'bot';
 
           if (currentTurnRef.current !== newTurn) {
             currentTurnRef.current = newTurn;
             setCurrentTurn(newTurn);
 
+            // ALWAYS reset striker state completely on turn change so striker is 100% available and visible
+            strikerRef.current = {
+              id: 99,
+              type: 'white',
+              x: 400,
+              y: newTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
+              vx: 0,
+              vy: 0,
+              radius: STRIKER_RADIUS,
+              mass: 3.5,
+              isSinking: false,
+              sinkScale: 1,
+              isPocketed: false,
+            };
+
+            setStrikerX(400);
+            isTurnInProgressRef.current = false;
+            setIsStrikerMoving(false);
+
             const targetY = newTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
-            const targetX = newTurn === 'player' ? strikerX : 400;
-            triggerStrikerReturnAnimation(targetX, targetY);
+            triggerStrikerReturnAnimation(400, targetY);
           }
         }
 
-        // 3. Sync scores & queen state
+        // 3. Sync scores & queen state (Host score = White count, Guest score = Black count)
         if (typeof parsed.hostScore === 'number' && typeof parsed.guestScore === 'number') {
-          if (isLocalHost) {
-            setPlayerWhitePocketed(parsed.hostScore);
-            setBotBlackPocketed(parsed.guestScore);
-          } else {
-            setPlayerWhitePocketed(parsed.guestScore);
-            setBotBlackPocketed(parsed.hostScore);
-          }
+          setPlayerWhitePocketed(parsed.hostScore);
+          setBotBlackPocketed(parsed.guestScore);
         }
 
         if (parsed.queenState) {
-          setQueenState(fromAuthoritativeQueenState(parsed.queenState, isLocalHost));
+          setQueenState(fromAuthoritativeQueenState(parsed.queenState, isHost));
         }
 
         // 4. Sync coin positions if not currently running local physics turn simulation
@@ -1633,10 +1659,13 @@ export default function App() {
           }
         }
 
-        // 5. Process opponent shot
+        // 5. Process opponent shot (STRICT STALE SHOT & REPLAY PREVENTION)
         if (parsed.lastShot && parsed.lastShot.sequenceNumber > lastShotSequenceRef.current) {
-          lastShotSequenceRef.current = parsed.lastShot.sequenceNumber;
-          if (parsed.lastShot.shooterName !== playerName) {
+          const shotSeq = parsed.lastShot.sequenceNumber;
+          lastShotSequenceRef.current = shotSeq; // Consume sequence immediately
+
+          // Only simulate motion if this shot was executed by the OPPONENT
+          if (parsed.lastShot.shooterRole !== localRoleRef.current) {
             const shot = parsed.lastShot;
             const s = strikerRef.current;
             s.x = shot.strikerX;
@@ -1869,10 +1898,15 @@ export default function App() {
     pocketsInTurnRef.current = [];
     strikerPocketedInTurnRef.current = false;
 
+    const isHost = localRoleRef.current === 'host';
+
     // Coins pocketed this turn
     const whitePocketedThisTurn = pocketedCoins.filter((c) => c.type === 'white').length;
     const blackPocketedThisTurn = pocketedCoins.filter((c) => c.type === 'black').length;
     const queenPocketedThisTurn = pocketedCoins.some((c) => c.type === 'queen');
+
+    const playerPocketedThisTurn = isHost ? whitePocketedThisTurn : blackPocketedThisTurn;
+    const botPocketedThisTurn = isHost ? blackPocketedThisTurn : whitePocketedThisTurn;
 
     let newWhiteTotal = playerWhitePocketed + whitePocketedThisTurn;
     let newBlackTotal = botBlackPocketed + blackPocketedThisTurn;
@@ -1886,14 +1920,17 @@ export default function App() {
       soundEngine.playFoul();
 
       if (currentWho === 'player') {
-        if (newWhiteTotal >= 1) {
-          // Score is 1 or greater: foul IS considered
-          newWhiteTotal = Math.max(0, newWhiteTotal - 1);
-          returnCoinToCenter('white');
+        const playerOwnTotal = isHost ? newWhiteTotal : newBlackTotal;
+        if (playerOwnTotal >= 1) {
+          if (isHost) {
+            newWhiteTotal = Math.max(0, newWhiteTotal - 1);
+            returnCoinToCenter('white');
+          } else {
+            newBlackTotal = Math.max(0, newBlackTotal - 1);
+            returnCoinToCenter('black');
+          }
           spawnFloatingScore(400, PLAYER_BASELINE_Y, 'FOUL! -1 COIN DEDUCTED', '#EF4444');
         } else {
-          // Score is 0: foul is NOT considered and score never falls below 0
-          newWhiteTotal = 0;
           spawnFloatingScore(400, PLAYER_BASELINE_Y, 'STRIKER SINK (SCORE 0 - NO PENALTY)', '#F59E0B');
         }
 
@@ -1902,12 +1939,16 @@ export default function App() {
           setQueenState('on_board');
         }
       } else {
-        if (newBlackTotal >= 1) {
-          newBlackTotal = Math.max(0, newBlackTotal - 1);
-          returnCoinToCenter('black');
+        const botOwnTotal = isHost ? newBlackTotal : newWhiteTotal;
+        if (botOwnTotal >= 1) {
+          if (isHost) {
+            newBlackTotal = Math.max(0, newBlackTotal - 1);
+            returnCoinToCenter('black');
+          } else {
+            newWhiteTotal = Math.max(0, newWhiteTotal - 1);
+            returnCoinToCenter('white');
+          }
           spawnFloatingScore(400, BOT_BASELINE_Y, 'BOT FOUL!', '#EF4444');
-        } else {
-          newBlackTotal = 0;
         }
 
         if (queenState === 'pending_bot') {
@@ -1916,7 +1957,6 @@ export default function App() {
         }
       }
 
-      // Next striker hitting chance given to the next player
       nextWho = currentWho === 'player' ? 'bot' : 'player';
     } else {
       // -------------------------------------------------------------
@@ -1924,46 +1964,37 @@ export default function App() {
       // -------------------------------------------------------------
 
       if (currentWho === 'player') {
-        // Player's turn (Owns White)
+        // Player's turn (Owns own coin type based on role)
         if (queenPocketedThisTurn) {
-          // Player just pocketed Queen on this turn!
-          if (whitePocketedThisTurn >= 1) {
-            // Already covered in same shot!
+          if (playerPocketedThisTurn >= 1) {
             setQueenState('covered_player');
             spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
-            nextWho = 'player'; // Extra turn
-          } else {
-            // Queen pending: must cover on next shot
-            setQueenState('pending_player');
-            nextWho = 'player'; // Extra turn to cover
-          }
-        } else if (queenState === 'pending_player') {
-          // Player had a pending Queen from previous shot
-          if (whitePocketedThisTurn >= 1) {
-            // Cover successful!
-            setQueenState('covered_player');
-            spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
-            nextWho = 'player'; // Extra turn
-          } else {
-            // Failed to pocket White coin! Queen returns to center!
-            returnCoinToCenter('queen');
-            setQueenState('on_board');
-            nextWho = 'bot'; // Turn passes to opponent
-          }
-        } else {
-          // Standard shot: Rule 6
-          if (whitePocketedThisTurn >= 1) {
-            // Pocketed own white coin -> Extra turn!
             nextWho = 'player';
           } else {
-            // Pocketed no white coin (or only black coins) -> Next turn given to Opponent!
+            setQueenState('pending_player');
+            nextWho = 'player';
+          }
+        } else if (queenState === 'pending_player') {
+          if (playerPocketedThisTurn >= 1) {
+            setQueenState('covered_player');
+            spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
+            nextWho = 'player';
+          } else {
+            returnCoinToCenter('queen');
+            setQueenState('on_board');
+            nextWho = 'bot';
+          }
+        } else {
+          if (playerPocketedThisTurn >= 1) {
+            nextWho = 'player';
+          } else {
             nextWho = 'bot';
           }
         }
       } else {
-        // Bot's turn (Owns Black)
+        // Opponent's turn (Owns opponent coin type based on role)
         if (queenPocketedThisTurn) {
-          if (blackPocketedThisTurn >= 1) {
+          if (botPocketedThisTurn >= 1) {
             setQueenState('covered_bot');
             spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
             nextWho = 'bot';
@@ -1972,7 +2003,7 @@ export default function App() {
             nextWho = 'bot';
           }
         } else if (queenState === 'pending_bot') {
-          if (blackPocketedThisTurn >= 1) {
+          if (botPocketedThisTurn >= 1) {
             setQueenState('covered_bot');
             spawnFloatingScore(400, 400, '+3 SECURED', '#FBBF24');
             nextWho = 'bot';
@@ -1982,8 +2013,7 @@ export default function App() {
             nextWho = 'player';
           }
         } else {
-          // Standard shot: Rule 6
-          if (blackPocketedThisTurn >= 1) {
+          if (botPocketedThisTurn >= 1) {
             nextWho = 'bot';
           } else {
             nextWho = 'player';
@@ -2048,23 +2078,40 @@ export default function App() {
     setIdleSeconds(0);
     lastActivityTimeRef.current = Date.now();
 
-    // Trigger smooth striker return-to-baseline animation
+    // ALWAYS reset striker state completely on turn change so striker is 100% available and visible
     const nextBaseY = nextWho === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
-    const nextBaseX = nextWho === 'player' ? strikerX : 400;
-    triggerStrikerReturnAnimation(nextBaseX, nextBaseY);
+    strikerRef.current = {
+      id: 99,
+      type: 'white',
+      x: 400,
+      y: nextBaseY,
+      vx: 0,
+      vy: 0,
+      radius: STRIKER_RADIUS,
+      mass: 3.5,
+      isSinking: false,
+      sinkScale: 1,
+      isPocketed: false,
+    };
+
+    if (nextWho === 'player') {
+      setStrikerX(400);
+    }
+
+    triggerStrikerReturnAnimation(400, nextBaseY);
 
     // Synchronize Authoritative Game State to Firestore ONLY if it was the local player's turn
     if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && currentWho === 'player') {
-      const isLocalHost = activeRoom.hostName === playerName;
+      const isHost = localRoleRef.current === 'host';
       const newSeq = (authoritativeSequenceRef.current || 0) + 1;
       authoritativeSequenceRef.current = newSeq;
 
-      const hostScore = isLocalHost ? newWhiteTotal : newBlackTotal;
-      const guestScore = isLocalHost ? newBlackTotal : newWhiteTotal;
+      const hostScore = isHost ? newWhiteTotal : newBlackTotal;
+      const guestScore = isHost ? newBlackTotal : newWhiteTotal;
 
       const nextTurnRole: 'host' | 'guest' = nextWho === 'player'
-        ? (isLocalHost ? 'host' : 'guest')
-        : (isLocalHost ? 'guest' : 'host');
+        ? localRoleRef.current
+        : (localRoleRef.current === 'host' ? 'guest' : 'host');
 
       const gameStatus = (newWhiteTotal >= 9 || newBlackTotal >= 9) ? 'finished' : 'playing';
       const now = Date.now();
@@ -2089,7 +2136,7 @@ export default function App() {
         turnDuration: 20,
         hostScore,
         guestScore,
-        queenState: toAuthoritativeQueenState(queenState, isLocalHost),
+        queenState: toAuthoritativeQueenState(queenState, isHost),
         coins: authCoins,
         striker: {
           x: strikerRef.current.x,
@@ -2171,29 +2218,42 @@ export default function App() {
   }, [queenState]);
 
   /* ==========================================================================
-     20-SECOND TURN TIMER (REQUIREMENT 2: 20s LIMIT, 5s IDLE TRIGGER, TICKING AUDIO)
+     STRICT 20-SECOND TURN TIMER & TICKING AUDIO LIFECYCLE (ISSUE 1 FIX)
      ========================================================================== */
+  const lastTickedSecondRef = useRef<number>(-1);
+
   useEffect(() => {
-    if (screen !== 'gameplay' || isStrikerMoving || isTurnInProgressRef.current || gameOverResult) {
+    if (screen !== 'gameplay' || gameOverResult) {
+      lastTickedSecondRef.current = -1;
       return;
     }
 
     const interval = setInterval(() => {
       const now = Date.now();
+      const isMyTurnActive = currentTurnRef.current === 'player';
+      const isStrikerStill = !isStrikerMoving && !isTurnInProgressRef.current;
 
       if (matchmakingMode === 'PRIVATE_ROOM') {
         const deadline = authoritativeDeadlineRef.current || (now + 20000);
         const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
         setTurnTimeLeft(remaining);
 
-        if (remaining <= 5 && remaining > 0) {
-          soundEngine.playTick(remaining <= 2);
+        // Strict Ticking Audio Lifecycle (Starts at 10s ONLY for active local player's turn, stops on turn change/expiration/shot)
+        if (isMyTurnActive && isStrikerStill && remaining <= 10 && remaining > 0) {
+          if (lastTickedSecondRef.current !== remaining) {
+            lastTickedSecondRef.current = remaining;
+            soundEngine.playTick(remaining <= 3);
+          }
+        } else {
+          lastTickedSecondRef.current = -1;
         }
 
+        // Timeout turn transfer for Host
         if (remaining <= 0 && currentTurnRef.current === 'player') {
           soundEngine.playFoul();
-          const isLocalHost = activeRoom.hostName === playerName;
-          const nextTurnRole: 'host' | 'guest' = isLocalHost ? 'guest' : 'host';
+          lastTickedSecondRef.current = -1;
+          const isHost = localRoleRef.current === 'host';
+          const nextTurnRole: 'host' | 'guest' = isHost ? 'guest' : 'host';
           setCurrentTurn('bot');
           currentTurnRef.current = 'bot';
 
@@ -2220,9 +2280,9 @@ export default function App() {
             turnStartedAt: Date.now(),
             turnDeadline: newDeadline,
             turnDuration: 20,
-            hostScore: isLocalHost ? playerWhitePocketed : botBlackPocketed,
-            guestScore: isLocalHost ? botBlackPocketed : playerWhitePocketed,
-            queenState: toAuthoritativeQueenState(queenState, isLocalHost),
+            hostScore: isHost ? playerWhitePocketed : botBlackPocketed,
+            guestScore: isHost ? botBlackPocketed : playerWhitePocketed,
+            queenState: toAuthoritativeQueenState(queenState, isHost),
             coins: authCoins,
             striker: {
               x: 400,
@@ -2242,57 +2302,62 @@ export default function App() {
         const elapsedIdle = Math.floor((now - lastActivityTimeRef.current) / 1000);
         setIdleSeconds(elapsedIdle);
 
-        if (elapsedIdle >= 5) {
-          const remaining = Math.max(0, 20 - elapsedIdle);
-          setTurnTimeLeft(remaining);
+        const remaining = Math.max(0, 20 - elapsedIdle);
+        setTurnTimeLeft(remaining);
 
-          if (remaining <= 5 && remaining > 0) {
-            soundEngine.playTick(remaining <= 2);
-          }
-
-          if (remaining <= 0) {
-            soundEngine.playFoul();
-            const nextTurn = currentTurnRef.current === 'player' ? 'bot' : 'player';
-            spawnFloatingScore(
-              400,
-              currentTurnRef.current === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
-              "TIME'S UP! TURN PASSED",
-              '#EF4444'
-            );
-
-            setCurrentTurn(nextTurn);
-            currentTurnRef.current = nextTurn;
-
-            const nextBaseY = nextTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
-            strikerRef.current = {
-              ...strikerRef.current,
-              x: 400,
-              y: nextBaseY,
-              vx: 0,
-              vy: 0,
-              isSinking: false,
-              sinkScale: 1,
-              isPocketed: false,
-            };
-            setStrikerX(400);
-
-            lastActivityTimeRef.current = Date.now();
-            setIdleSeconds(0);
-            setTurnTimeLeft(20);
-
-            if (nextTurn === 'bot') {
-              setTimeout(() => {
-                executeBotTurn();
-              }, 700);
-            }
+        if (isMyTurnActive && isStrikerStill && remaining <= 10 && remaining > 0) {
+          if (lastTickedSecondRef.current !== remaining) {
+            lastTickedSecondRef.current = remaining;
+            soundEngine.playTick(remaining <= 3);
           }
         } else {
+          lastTickedSecondRef.current = -1;
+        }
+
+        if (remaining <= 0) {
+          soundEngine.playFoul();
+          lastTickedSecondRef.current = -1;
+          const nextTurn = currentTurnRef.current === 'player' ? 'bot' : 'player';
+          spawnFloatingScore(
+            400,
+            currentTurnRef.current === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
+            "TIME'S UP! TURN PASSED",
+            '#EF4444'
+          );
+
+          setCurrentTurn(nextTurn);
+          currentTurnRef.current = nextTurn;
+
+          const nextBaseY = nextTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
+          strikerRef.current = {
+            ...strikerRef.current,
+            x: 400,
+            y: nextBaseY,
+            vx: 0,
+            vy: 0,
+            isSinking: false,
+            sinkScale: 1,
+            isPocketed: false,
+          };
+          setStrikerX(400);
+
+          lastActivityTimeRef.current = Date.now();
+          setIdleSeconds(0);
           setTurnTimeLeft(20);
+
+          if (nextTurn === 'bot') {
+            setTimeout(() => {
+              executeBotTurn();
+            }, 700);
+          }
         }
       }
     }, 1000);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      lastTickedSecondRef.current = -1;
+    };
   }, [screen, isStrikerMoving, gameOverResult, matchmakingMode, executeBotTurn, spawnFloatingScore, activeRoom, playerName, playerWhitePocketed, botBlackPocketed, queenState]);
 
   /* ==========================================================================
@@ -2372,7 +2437,8 @@ export default function App() {
     const s = strikerRef.current;
     const distToStriker = Math.hypot(clickX - s.x, clickY - s.y);
 
-    if (distToStriker < STRIKER_RADIUS * 2.8 || clickY > PLAYER_BASELINE_Y - 50) {
+    // Require touching/clicking directly on or within close proximity of the striker
+    if (distToStriker <= STRIKER_RADIUS * 2.5) {
       dragTrackingRef.current = {
         active: true,
         touchStartX: e.clientX,
@@ -2389,6 +2455,7 @@ export default function App() {
   useEffect(() => {
     const handleGlobalPointerMove = (e: PointerEvent) => {
       if (!dragTrackingRef.current.active) return;
+      notifyActivity();
       dragTrackingRef.current.currentPointerX = e.clientX;
       dragTrackingRef.current.currentPointerY = e.clientY;
       updateDragFromPointer(e.clientX, e.clientY);
@@ -2412,7 +2479,8 @@ export default function App() {
       const pullY = currentY - s.y;
       const pullDist = Math.hypot(pullX, pullY);
 
-      if (pullDist > 8) {
+      // Require at least 18px of intentional backward drag to release a shot (prevents accidental taps/clicks)
+      if (pullDist >= 18) {
         const clampedPull = Math.min(MAX_DRAG_DIST, pullDist);
         const t = clampedPull / MAX_DRAG_DIST;
         const power = Math.pow(t, 1.35);
@@ -2431,8 +2499,8 @@ export default function App() {
 
         // Broadcast shot to Firestore for real-time 2-player multiplayer
         if (activeRoom.gameId && screen === 'gameplay') {
-          const isLocalHost = activeRoom.hostName === playerName;
-          const shooterRole: 'host' | 'guest' = isLocalHost ? 'host' : 'guest';
+          const isHost = localRoleRef.current === 'host';
+          const shooterRole: 'host' | 'guest' = localRoleRef.current;
           const newShotSeq = (lastShotSequenceRef.current || 0) + 1;
           lastShotSequenceRef.current = newShotSeq;
 
@@ -2460,8 +2528,8 @@ export default function App() {
             isPocketed: c.isPocketed,
           }));
 
-          const hostScore = isLocalHost ? playerWhitePocketed : botBlackPocketed;
-          const guestScore = isLocalHost ? botBlackPocketed : playerWhitePocketed;
+          const hostScore = isHost ? playerWhitePocketed : botBlackPocketed;
+          const guestScore = isHost ? botBlackPocketed : playerWhitePocketed;
 
           const now = Date.now();
           const gameStateWithShot: AuthoritativeGameState = {
@@ -2474,7 +2542,7 @@ export default function App() {
             turnDuration: 20,
             hostScore,
             guestScore,
-            queenState: toAuthoritativeQueenState(queenState, isLocalHost),
+            queenState: toAuthoritativeQueenState(queenState, isHost),
             coins: authCoins,
             striker: {
               x: s.x,
@@ -3502,12 +3570,12 @@ export default function App() {
           <span className="text-[11px] font-bold text-neutral-200 tracking-tight leading-none pl-0.5">
             {opponentName}
           </span>
-          {/* Black Coin Counter: Styled to match authentic board coin (Requirement 6) */}
+          {/* Coin Counter: Styled to match authentic board coin for Opponent */}
           <div className="flex items-center gap-1.5 pl-0.5 mt-0.5">
             <span className="font-display font-black text-base text-white tabular-nums">
-              {botBlackPocketed}
+              {localRole === 'host' ? botBlackPocketed : playerWhitePocketed}
             </span>
-            <ScoreboardCarromCoin type="black" size={20} />
+            <ScoreboardCarromCoin type={localRole === 'host' ? 'black' : 'white'} size={20} />
             {queenState === 'covered_bot' && (
               <ScoreboardCarromCoin type="queen" size={16} />
             )}
@@ -3567,14 +3635,14 @@ export default function App() {
           <span className="text-[11px] font-bold text-emerald-300 tracking-tight leading-none pr-0.5">
             {playerName}
           </span>
-          {/* White Coin Counter: Styled to match authentic board coin (Requirement 6) */}
+          {/* Coin Counter: Styled to match authentic board coin for Player */}
           <div className="flex items-center gap-1.5 pr-0.5 mt-0.5">
             {queenState === 'covered_player' && (
               <ScoreboardCarromCoin type="queen" size={16} />
             )}
-            <ScoreboardCarromCoin type="white" size={20} />
+            <ScoreboardCarromCoin type={localRole === 'host' ? 'white' : 'black'} size={20} />
             <span className="font-display font-black text-base text-white tabular-nums">
-              {playerWhitePocketed}
+              {localRole === 'host' ? playerWhitePocketed : botBlackPocketed}
             </span>
           </div>
 
@@ -3598,43 +3666,23 @@ export default function App() {
             className="w-full h-full cursor-crosshair touch-none select-none"
           />
 
-          {/* DIRECT ON-SCREEN COUNTDOWN OVERLAY - VISIBLE DURING ACTIVE TURN */}
-          {!isStrikerMoving && !isTurnInProgressRef.current && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none z-20">
-              <div
-                className={`flex items-center gap-2 rounded-full px-4 py-1.5 backdrop-blur-md border shadow-2xl transition-all duration-300 ${
-                  turnTimeLeft <= 5
-                    ? 'bg-red-950/95 border-red-500 text-red-100 ring-2 ring-red-500/60 scale-105 animate-pulse shadow-red-500/40'
-                    : 'bg-neutral-950/85 border-amber-400/80 text-amber-300 shadow-amber-500/20'
-                }`}
-              >
-                <div className={`w-2.5 h-2.5 rounded-full ${turnTimeLeft <= 5 ? 'bg-red-500 animate-ping' : 'bg-amber-400'}`} />
-                <span className="text-xs font-extrabold uppercase tracking-wider">
-                  {currentTurn === 'player' ? 'Your Turn' : `${opponentName}`}
+          {/* CENTER CANVAS COUNTDOWN CARD - EXCLUSIVE TO ACTIVE LOCAL PLAYER'S TURN */}
+          {!isStrikerMoving && !isTurnInProgressRef.current && currentTurn === 'player' && turnTimeLeft <= 10 && (
+            <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-30">
+              <div className="flex flex-col items-center justify-center rounded-3xl px-8 py-5 bg-[#3c1414]/90 border-2 border-red-500/90 text-red-100 ring-4 ring-red-500/40 scale-105 animate-pulse shadow-[0_0_50px_rgba(239,68,68,0.6)] backdrop-blur-md min-w-[230px]">
+                <span className="text-sm font-extrabold uppercase tracking-widest text-amber-400 mb-0.5 drop-shadow-sm">
+                  YOUR TURN
                 </span>
-                <span className="font-display font-black text-xl tracking-tight tabular-nums border-l border-neutral-700 pl-2.5">
-                  {turnTimeLeft}s
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* WARNING COUNTDOWN CENTER BANNER ON LAST 5 SECONDS */}
-          {!isStrikerMoving && !isTurnInProgressRef.current && turnTimeLeft <= 5 && (
-            <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-20">
-              <div className="flex flex-col items-center justify-center rounded-3xl px-6 py-4 bg-red-950/90 border-2 border-red-500 text-red-100 ring-4 ring-red-500/50 scale-105 animate-pulse shadow-2xl shadow-red-500/50 backdrop-blur-md">
-                <span className="text-xs uppercase tracking-widest font-black text-red-300 mb-0.5">
-                  ⚠️ TIME RUNNING OUT!
-                </span>
-                <div className="flex items-baseline gap-1 my-0.5">
-                  <span className="font-display font-black text-6xl tracking-tight tabular-nums drop-shadow-xl text-red-100">
+                <div className="flex items-baseline justify-center gap-1 my-1">
+                  <span className="font-display font-black text-7xl tracking-tight tabular-nums drop-shadow-2xl text-white">
                     {turnTimeLeft}
                   </span>
-                  <span className="text-xl font-bold text-red-300">s</span>
+                  <span className="text-2xl font-black text-neutral-300">s</span>
                 </div>
-                <span className="text-[10px] text-red-200 font-semibold mt-1">
-                  Take your shot quickly!
-                </span>
+                <div className="flex items-center gap-1.5 mt-2 text-xs font-semibold text-red-200">
+                  <span className="text-amber-400 text-sm">⚠️</span>
+                  <span>Striking timer running out!</span>
+                </div>
               </div>
             </div>
           )}
@@ -3667,16 +3715,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* --- BOTTOM CONTROLS & ACTION BUTTONS (REQUIREMENT 4, 7 & 10: CLEAN PREMIUM CONTROLS) --- */}
-      <div className="relative z-10 w-full max-w-[460px] mx-auto px-5 pb-5 pt-1 flex items-center justify-between">
-        {/* Bottom Left: Chat Bubble Button */}
-        <button
-          onClick={() => setActiveModal('chat')}
-          className="w-14 h-14 rounded-full bg-gradient-to-b from-[#F5C242] to-[#D9961A] border-2 border-[#FFF0A0] shadow-[0_4px_14px_rgba(217,150,26,0.6)] flex items-center justify-center active:scale-95 transition-transform"
-          aria-label="Open Chat Emojis"
-        >
-          <MessageCircle className="w-6 h-6 text-neutral-900 fill-neutral-900" />
-        </button>
+      {/* --- BOTTOM CONTROLS & ACTION BUTTONS --- */}
+      <div className="relative z-10 w-full max-w-[460px] mx-auto px-5 pb-5 pt-1 flex items-center justify-end">
 
         {/* Bottom Right: Menu Button */}
         <button
@@ -4610,8 +4650,12 @@ export default function App() {
         <AdminPanel
           onClose={() => {
             setIsAdminOpen(false);
-            if (window.location.hash.toLowerCase().includes('admin')) {
-              history.pushState(null, '', window.location.pathname);
+            if (window.location.pathname !== '/' || window.location.hash || window.location.search) {
+              try {
+                window.history.pushState(null, '', '/');
+              } catch {
+                // Ignore history error
+              }
             }
           }}
         />

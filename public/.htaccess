@@ -1,0 +1,13 @@
+# Apache Server-Side URL Rewrite Rules for Single Page Application (SPA)
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Serve existing files and directories directly
+  RewriteRule ^index\.html$ - [L]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+
+  # Rewrite all application routes server-side to index.html
+  RewriteRule . /index.html [L]
+</IfModule>

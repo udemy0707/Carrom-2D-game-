@@ -87,7 +87,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
   const [currentPwInput, setCurrentPwInput] = useState('');
   const [newPwInput, setNewPwInput] = useState('');
   const [confirmPwInput, setConfirmPwInput] = useState('');
-  const [customSlugInput, setCustomSlugInput] = useState(securityConfig.urlSlug || 'admin');
+  const [customSlugInput, setCustomSlugInput] = useState(securityConfig.urlSlug || '');
   const [pwChangeMessage, setPwChangeMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Filter states
@@ -228,7 +228,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
 
     const updated = await saveAdminSecurity({
       passwordHash: newPwInput,
-      urlSlug: customSlugInput.trim().toLowerCase() || 'admin',
+      urlSlug: customSlugInput.trim().toLowerCase(),
     });
 
     setSecurityConfig(updated);
@@ -1065,7 +1065,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
                       />
                     </div>
                     <p className="text-[11px] text-neutral-500 mt-1">
-                      Type this word in the URL bar (e.g. <code>/{customSlugInput || 'admin'}</code>) to access the admin panel. Synced server-side.
+                      Type this word in the URL bar (e.g. <code>/{customSlugInput || 'secret-slug'}</code>) to access the admin panel. Synced server-side.
                     </p>
                   </div>
 
