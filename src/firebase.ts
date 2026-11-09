@@ -39,9 +39,46 @@ export interface FirestoreErrorInfo {
   };
 }
 
+// Quota State Management
+let quotaExceededState = false;
+const quotaListeners = new Set<(exceeded: boolean) => void>();
+
+export function isQuotaExceeded(): boolean {
+  return quotaExceededState;
+}
+
+export function notifyQuotaExceeded(): void {
+  if (!quotaExceededState) {
+    quotaExceededState = true;
+    quotaListeners.forEach((cb) => cb(true));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('firestore_quota_exceeded'));
+    }
+  }
+}
+
+export function subscribeToQuotaState(callback: (exceeded: boolean) => void): () => void {
+  quotaListeners.add(callback);
+  callback(quotaExceededState);
+  return () => {
+    quotaListeners.delete(callback);
+  };
+}
+
+export function isQuotaError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as any)?.code;
+  return code === 'resource-exhausted' || msg.includes('resource-exhausted') || msg.includes('Quota exceeded');
+}
+
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errMsg = error instanceof Error ? error.message : String(error);
+  if (isQuotaError(error)) {
+    notifyQuotaExceeded();
+  }
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: errMsg,
     authInfo: {
       userId: auth.currentUser?.uid || getDeviceUid(),
       email: auth.currentUser?.email,
@@ -66,8 +103,12 @@ async function testConnection() {
     await getDocFromServer(doc(db, 'config', 'deposit'));
     console.log('Successfully connected to Firebase Firestore!');
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration or internet connection.');
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes('resource-exhausted') || msg.includes('Quota exceeded')) {
+      notifyQuotaExceeded();
+      console.warn('Firestore daily quota exceeded. Offline/local mode active.');
+    } else if (msg.includes('the client is offline')) {
+      console.warn('Please check your Firebase configuration or internet connection.');
     }
   }
 }
@@ -120,3 +161,4 @@ export async function signInWithGoogle(): Promise<AppUser> {
     throw err;
   }
 }
+

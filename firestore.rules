@@ -63,18 +63,18 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Rules for Deposit Requests collection
+    // Rules for Deposit Requests collection - Permanent Deletion Allowed
     match /deposit_requests/{requestId} {
       allow get, list: if true;
       allow create, update: if isValidDepositRequest(incoming());
-      allow delete: if false;
+      allow delete: if true;
     }
 
-    // Rules for Withdrawal Requests collection
+    // Rules for Withdrawal Requests collection - Permanent Deletion Allowed
     match /withdrawal_requests/{requestId} {
       allow get, list: if true;
       allow create, update: if isValidWithdrawalRequest(incoming());
-      allow delete: if false;
+      allow delete: if true;
     }
 
     // Rules for Deposit Configuration

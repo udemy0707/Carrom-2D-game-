@@ -32,7 +32,7 @@ interface DepositPaymentPageProps {
 }
 
 // Client-side image scaler to keep localStorage fast and avoid browser storage quota errors
-function compressScreenshot(file: File, maxDim = 1200, quality = 0.85): Promise<{ base64: string; sizeKb: number }> {
+function compressScreenshot(file: File, maxDim = 800, quality = 0.7): Promise<{ base64: string; sizeKb: number }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = reject;

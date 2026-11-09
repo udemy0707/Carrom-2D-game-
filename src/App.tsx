@@ -37,11 +37,13 @@ import {
   QrCode
 } from 'lucide-react';
 
+import { subscribeToQuotaState, isQuotaExceeded, ensureFirebaseAuth } from './firebase';
 import { AdminPanel } from './components/AdminPanel';
 import { DepositPaymentPage } from './components/DepositPaymentPage';
 import {
   checkIsAdminUrl,
   subscribeToSync,
+  subscribeToUserWallet,
   submitWithdrawalRequest,
   getWithdrawalRequests,
   getAdminDepositConfig,
@@ -983,6 +985,18 @@ export default function App() {
     status: 'requesting' | 'approved' | 'declined';
   } | null>(null);
 
+  // Firestore Quota Exceeded banner state
+  const [isQuotaExceededState, setIsQuotaExceededState] = useState<boolean>(() => isQuotaExceeded());
+
+  useEffect(() => {
+    const unsub = subscribeToQuotaState((exceeded) => {
+      if (exceeded) {
+        setIsQuotaExceededState(true);
+      }
+    });
+    return () => unsub();
+  }, []);
+
   // Authoritative State Tracking Refs for 100% Real-Time Multiplayer Sync
   const authoritativeSequenceRef = useRef<number>(0);
   const authoritativeDeadlineRef = useRef<number>(Date.now() + 20000);
@@ -1036,10 +1050,34 @@ export default function App() {
     soundEngine.enabled = !soundMuted;
   }, [soundMuted]);
 
-  // Permanent Wallet persistence (do not broadcast back to self to prevent infinite update loops)
+  // Permanent Wallet persistence (debounced to prevent LocalStorage quota overflow while typing)
   useEffect(() => {
-    savePlayerWallet(wallet, playerName, false);
+    const timer = setTimeout(() => {
+      savePlayerWallet(wallet, playerName, false);
+    }, 300);
+    return () => clearTimeout(timer);
   }, [wallet, playerName]);
+
+  // Real-Time Cross-Device User Wallet Balance Listener from Firestore
+  useEffect(() => {
+    let unsubWallet: (() => void) | null = null;
+    ensureFirebaseAuth().then((user) => {
+      unsubWallet = subscribeToUserWallet(user.uid, (data) => {
+        setWallet((prev) => {
+          if (prev.realBalance === data.withdrawableCoins) return prev;
+          return {
+            ...prev,
+            realBalance: data.withdrawableCoins,
+            matchesPlayed: data.totalMatches || prev.matchesPlayed,
+            matchesWon: data.wins || prev.matchesWon,
+          };
+        });
+      });
+    });
+    return () => {
+      if (unsubWallet) unsubWallet();
+    };
+  }, [playerName]);
 
   // Player Name persistence & data binding
   useEffect(() => {
@@ -3549,6 +3587,8 @@ export default function App() {
           background: 'radial-gradient(ellipse at 50% 32%, #0b492f 0%, #063521 55%, #021f13 100%)',
         }}
       />
+
+
 
       {/* --- TOP BAR (MATCHING REFERENCE IMAGE EXACTLY WITH QUEEN INDICATOR) --- */}
       <div className="relative z-10 w-full max-w-[460px] mx-auto px-4 pt-3 pb-1 flex items-center justify-between">

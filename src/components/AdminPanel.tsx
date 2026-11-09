@@ -25,8 +25,10 @@ import {
   ChevronRight,
   TrendingUp,
   Trash2,
+  AlertTriangle,
   X
 } from 'lucide-react';
+import { subscribeToQuotaState, isQuotaExceeded } from '../firebase';
 import {
   AdminDepositConfig,
   DepositRequest,
@@ -66,7 +68,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
   const [loginError, setLoginError] = useState('');
 
   // Active Tab: 'deposits_config' | 'deposit_requests' | 'withdrawals' | 'security'
-  const [activeTab, setActiveTab] = useState<'deposits_config' | 'deposit_requests' | 'withdrawals' | 'security'>('withdrawals');
+  const [activeTab, setActiveTab] = useState<'deposits_config' | 'deposit_requests' | 'withdrawals' | 'security'>(() => {
+    try {
+      const reqs = getDepositRequests();
+      const pendingDeposits = reqs.filter((r) => r.status === 'pending').length;
+      if (pendingDeposits > 0) return 'deposit_requests';
+    } catch {}
+    return 'deposit_requests';
+  });
 
   // Admin Data States
   const [depositConfig, setDepositConfig] = useState<AdminDepositConfig>(getAdminDepositConfig);
@@ -89,6 +98,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
   const [confirmPwInput, setConfirmPwInput] = useState('');
   const [customSlugInput, setCustomSlugInput] = useState(securityConfig.urlSlug || '');
   const [pwChangeMessage, setPwChangeMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Firestore Quota State
+  const [isQuotaExceededState, setIsQuotaExceededState] = useState<boolean>(() => isQuotaExceeded());
+
+  useEffect(() => {
+    const unsub = subscribeToQuotaState((exceeded) => {
+      if (exceeded) setIsQuotaExceededState(true);
+    });
+    return () => unsub();
+  }, []);
 
   // Filter states
   const [withdrawalFilter, setWithdrawalFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('pending');
@@ -239,26 +258,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
   };
 
   // Process Withdrawal: Completed or Reject
-  const handleProcessWithdrawal = (id: string, status: 'completed' | 'rejected') => {
-    updateWithdrawalStatus(id, status);
+  const handleProcessWithdrawal = async (id: string, status: 'completed' | 'rejected') => {
+    await updateWithdrawalStatus(id, status);
     setWithdrawalRequests(getWithdrawalRequests());
   };
 
   // Delete Withdrawal Request
-  const handleDeleteWithdrawal = (id: string) => {
-    deleteWithdrawalRequest(id);
+  const handleDeleteWithdrawal = async (id: string) => {
+    await deleteWithdrawalRequest(id);
     setWithdrawalRequests(getWithdrawalRequests());
   };
 
   // Process Deposit: Completed or Reject
-  const handleProcessDeposit = (id: string, status: 'completed' | 'rejected') => {
-    updateDepositStatus(id, status);
+  const handleProcessDeposit = async (id: string, status: 'completed' | 'rejected') => {
+    await updateDepositStatus(id, status);
     setDepositRequests(getDepositRequests());
   };
 
   // Delete Deposit Request
-  const handleDeleteDeposit = (id: string) => {
-    deleteDepositRequest(id);
+  const handleDeleteDeposit = async (id: string) => {
+    await deleteDepositRequest(id);
     setDepositRequests(getDepositRequests());
   };
 
@@ -353,6 +372,38 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
      ========================================================================== */
   return (
     <div className="fixed inset-0 z-50 bg-[#090D14] text-neutral-100 flex flex-col overflow-hidden font-sans select-none">
+      {/* Firestore Daily Quota Exceeded Alert Banner for Admin */}
+      {isQuotaExceededState && (
+        <div className="bg-amber-950/90 border-b border-amber-500/50 px-4 sm:px-8 py-2 text-amber-100 text-xs shadow-lg flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2 overflow-hidden">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 animate-pulse" />
+            <div>
+              <p className="font-bold text-amber-200">Firestore Daily Free Quota Exceeded</p>
+              <p className="text-[11px] text-amber-300/90 leading-tight">
+                Database cloud sync is running in local/offline mode. Daily free quota resets automatically every 24 hours. Local operations remain operational.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href="https://console.firebase.google.com/project/gen-lang-client-0121363322/firestore/databases/ai-studio-carrom2dgame-259800d7-cdd9-4da0-8e4d-1320fa7ff6bf/data?openUpgradeDialog=true"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-amber-950 font-bold rounded text-[11px] transition-colors"
+            >
+              Console
+            </a>
+            <button
+              onClick={() => setIsQuotaExceededState(false)}
+              className="p-1 text-amber-400 hover:text-amber-200"
+              title="Dismiss notice"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Admin Navbar */}
       <header className="h-16 border-b border-neutral-800/80 bg-neutral-950/80 backdrop-blur-md px-4 sm:px-8 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">

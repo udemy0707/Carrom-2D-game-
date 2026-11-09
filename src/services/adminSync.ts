@@ -8,6 +8,8 @@ import {
   db,
   ensureFirebaseAuth,
   handleFirestoreError,
+  notifyQuotaExceeded,
+  isQuotaError,
   OperationType,
 } from '../firebase';
 import {
@@ -15,9 +17,12 @@ import {
   setDoc,
   getDoc,
   updateDoc,
+  deleteDoc,
   collection,
   onSnapshot,
   runTransaction,
+  query,
+  limit,
 } from 'firebase/firestore';
 
 export interface AdminDepositConfig {
@@ -297,8 +302,179 @@ export function broadcastSync(type: SyncEventType, payload?: any) {
   }
 }
 
+const syncSubscribers = new Set<(msg: SyncMessage) => void>();
+let pooledUnsubscribe: (() => void) | null = null;
+
+function notifySubscribers(msg: SyncMessage) {
+  syncSubscribers.forEach((cb) => {
+    try {
+      cb(msg);
+    } catch (e) {
+      console.warn('Sync subscriber error:', e);
+    }
+  });
+}
+
+function startPooledFirestoreSync() {
+  if (pooledUnsubscribe) return;
+
+  let unsubConfig: () => void = () => {};
+  let unsubSecurity: () => void = () => {};
+  let unsubDeposits: () => void = () => {};
+  let unsubWithdrawals: () => void = () => {};
+
+  try {
+    unsubConfig = onSnapshot(
+      doc(db, 'config', 'deposit'),
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          const updatedConfig: AdminDepositConfig = {
+            upiId: data.upiId || DEFAULT_DEPOSIT_CONFIG.upiId,
+            payeeName: data.payeeName || DEFAULT_DEPOSIT_CONFIG.payeeName,
+            qrImageUrl: data.qrImageUrl || DEFAULT_DEPOSIT_CONFIG.qrImageUrl,
+            instructions: DEFAULT_DEPOSIT_CONFIG.instructions,
+            minDeposit: data.minDeposit ?? DEFAULT_DEPOSIT_CONFIG.minDeposit,
+            maxDeposit: data.maxDeposit ?? 50000,
+            minWithdrawal: DEFAULT_DEPOSIT_CONFIG.minWithdrawal,
+            updatedAt: Date.now(),
+          };
+          localStorage.setItem(STORAGE_KEYS.DEPOSIT_CONFIG, JSON.stringify(updatedConfig));
+          notifySubscribers({ type: 'DEPOSIT_CONFIG_UPDATED', payload: updatedConfig, timestamp: Date.now() });
+        }
+      },
+      (err) => {
+        if (isQuotaError(err)) {
+          notifyQuotaExceeded();
+        } else {
+          console.warn('Firestore deposit config sub error:', err.message);
+        }
+      }
+    );
+  } catch (e: any) {
+    if (isQuotaError(e)) {
+      notifyQuotaExceeded();
+    }
+  }
+
+  try {
+    unsubSecurity = onSnapshot(
+      doc(db, 'config', 'security'),
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          const updatedSec: AdminSecurityConfig = {
+            username: data.username || DEFAULT_SECURITY.username,
+            passwordHash: data.passwordHash || DEFAULT_SECURITY.passwordHash,
+            urlSlug: data.urlSlug || DEFAULT_SECURITY.urlSlug,
+          };
+          localStorage.setItem(STORAGE_KEYS.SECURITY, JSON.stringify(updatedSec));
+          notifySubscribers({ type: 'SECURITY_UPDATED', payload: updatedSec, timestamp: Date.now() });
+        }
+      },
+      (err) => {
+        if (isQuotaError(err)) {
+          notifyQuotaExceeded();
+        } else {
+          console.warn('Firestore security sub error:', err.message);
+        }
+      }
+    );
+  } catch (e: any) {
+    if (isQuotaError(e)) {
+      notifyQuotaExceeded();
+    }
+  }
+
+  try {
+    const depositQuery = query(collection(db, 'deposit_requests'), limit(50));
+    unsubDeposits = onSnapshot(
+      depositQuery,
+      (snap) => {
+        const items: DepositRequest[] = [];
+        snap.forEach((d) => {
+          const val = d.data();
+          const rawStatus = val.status || 'pending';
+          items.push({
+            id: val.id || d.id,
+            playerName: val.playerName || val.userId || 'Player',
+            amount: val.amount || 0,
+            utr: val.utrNumber || '',
+            screenshotUrl: val.screenshotUrl || (val.paymentMethod?.startsWith('data:image') ? val.paymentMethod : ''),
+            timestamp: val.createdAt ? new Date(val.createdAt).getTime() : Date.now(),
+            status: rawStatus === 'approved' ? 'completed' : (rawStatus as any),
+            rejectionReason: val.adminNotes,
+            userId: val.userId,
+          });
+        });
+        localStorage.setItem(STORAGE_KEYS.DEPOSIT_REQUESTS, JSON.stringify(items));
+        notifySubscribers({ type: 'DEPOSIT_REQUESTED', payload: items, timestamp: Date.now() });
+      },
+      (err) => {
+        if (isQuotaError(err)) {
+          notifyQuotaExceeded();
+        } else {
+          console.warn('Firestore deposit requests sub error:', err.message);
+        }
+      }
+    );
+  } catch (e: any) {
+    if (isQuotaError(e)) {
+      notifyQuotaExceeded();
+    }
+  }
+
+  try {
+    const withdrawalQuery = query(collection(db, 'withdrawal_requests'), limit(50));
+    unsubWithdrawals = onSnapshot(
+      withdrawalQuery,
+      (snap) => {
+        const items: WithdrawalRequest[] = [];
+        snap.forEach((d) => {
+          const val = d.data();
+          const rawStatus = val.status || 'pending';
+          items.push({
+            id: val.id || d.id,
+            playerName: val.playerName || val.userId || 'Player',
+            amount: val.amount || 0,
+            playerUpi: val.upiId || '',
+            timestamp: val.createdAt ? new Date(val.createdAt).getTime() : Date.now(),
+            status: rawStatus === 'approved' ? 'completed' : (rawStatus as any),
+            rejectionReason: val.adminNotes,
+            userId: val.userId,
+          });
+        });
+        localStorage.setItem(STORAGE_KEYS.WITHDRAWAL_REQUESTS, JSON.stringify(items));
+        notifySubscribers({ type: 'WITHDRAWAL_REQUESTED', payload: items, timestamp: Date.now() });
+      },
+      (err) => {
+        if (isQuotaError(err)) {
+          notifyQuotaExceeded();
+        } else {
+          console.warn('Firestore withdrawal requests sub error:', err.message);
+        }
+      }
+    );
+  } catch (e: any) {
+    if (isQuotaError(e)) {
+      notifyQuotaExceeded();
+    }
+  }
+
+  pooledUnsubscribe = () => {
+    unsubConfig();
+    unsubSecurity();
+    unsubDeposits();
+    unsubWithdrawals();
+    pooledUnsubscribe = null;
+  };
+}
+
 export function subscribeToSync(callback: (msg: SyncMessage) => void): () => void {
   if (typeof window === 'undefined') return () => {};
+
+  syncSubscribers.add(callback);
+  startPooledFirestoreSync();
 
   const handleCustomEvent = (e: Event) => {
     const custom = e as CustomEvent<SyncMessage>;
@@ -325,125 +501,16 @@ export function subscribeToSync(callback: (msg: SyncMessage) => void): () => voi
     broadcastChannel.addEventListener('message', handleBroadcast);
   }
 
-  // Subscribe to real-time Firestore collections
-  const unsubConfig = onSnapshot(
-    doc(db, 'config', 'deposit'),
-    (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        const updatedConfig: AdminDepositConfig = {
-          upiId: data.upiId || DEFAULT_DEPOSIT_CONFIG.upiId,
-          payeeName: data.payeeName || DEFAULT_DEPOSIT_CONFIG.payeeName,
-          qrImageUrl: data.qrImageUrl || DEFAULT_DEPOSIT_CONFIG.qrImageUrl,
-          instructions: DEFAULT_DEPOSIT_CONFIG.instructions,
-          minDeposit: data.minDeposit ?? DEFAULT_DEPOSIT_CONFIG.minDeposit,
-          maxDeposit: data.maxDeposit ?? 50000,
-          minWithdrawal: DEFAULT_DEPOSIT_CONFIG.minWithdrawal,
-          updatedAt: Date.now(),
-        };
-        localStorage.setItem(STORAGE_KEYS.DEPOSIT_CONFIG, JSON.stringify(updatedConfig));
-        callback({ type: 'DEPOSIT_CONFIG_UPDATED', payload: updatedConfig, timestamp: Date.now() });
-      }
-    },
-    (err) => {
-      console.warn('Firestore deposit config sub error:', err.message);
-    }
-  );
-
-  const unsubSecurity = onSnapshot(
-    doc(db, 'config', 'security'),
-    (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        const updatedSec: AdminSecurityConfig = {
-          username: data.username || DEFAULT_SECURITY.username,
-          passwordHash: data.passwordHash || DEFAULT_SECURITY.passwordHash,
-          urlSlug: data.urlSlug || DEFAULT_SECURITY.urlSlug,
-        };
-        localStorage.setItem(STORAGE_KEYS.SECURITY, JSON.stringify(updatedSec));
-        callback({ type: 'SECURITY_UPDATED', payload: updatedSec, timestamp: Date.now() });
-      } else {
-        // Initialize default security on server if not present
-        setDoc(doc(db, 'config', 'security'), {
-          username: DEFAULT_SECURITY.username,
-          passwordHash: DEFAULT_SECURITY.passwordHash,
-          urlSlug: DEFAULT_SECURITY.urlSlug,
-          updatedAt: new Date().toISOString(),
-        }).catch((err) => console.warn('Init server security error:', err));
-      }
-    },
-    (err) => {
-      console.warn('Firestore security sub error:', err.message);
-    }
-  );
-
-  const unsubDeposits = onSnapshot(
-    collection(db, 'deposit_requests'),
-    (snap) => {
-      const items: DepositRequest[] = [];
-      snap.forEach((d) => {
-        const val = d.data();
-        const rawStatus = val.status || 'pending';
-        items.push({
-          id: val.id || d.id,
-          playerName: val.playerName || val.userId || 'Player',
-          amount: val.amount || 0,
-          utr: val.utrNumber || '',
-          screenshotUrl: val.screenshotUrl || (val.paymentMethod?.startsWith('data:image') ? val.paymentMethod : ''),
-          timestamp: val.createdAt ? new Date(val.createdAt).getTime() : Date.now(),
-          status: rawStatus === 'approved' ? 'completed' : (rawStatus as any),
-          rejectionReason: val.adminNotes,
-          userId: val.userId,
-        });
-      });
-      if (items.length > 0) {
-        localStorage.setItem(STORAGE_KEYS.DEPOSIT_REQUESTS, JSON.stringify(items));
-        callback({ type: 'DEPOSIT_REQUESTED', payload: items, timestamp: Date.now() });
-      }
-    },
-    (err) => {
-      console.warn('Firestore deposit requests sub error:', err.message);
-    }
-  );
-
-  const unsubWithdrawals = onSnapshot(
-    collection(db, 'withdrawal_requests'),
-    (snap) => {
-      const items: WithdrawalRequest[] = [];
-      snap.forEach((d) => {
-        const val = d.data();
-        const rawStatus = val.status || 'pending';
-        items.push({
-          id: val.id || d.id,
-          playerName: val.playerName || val.userId || 'Player',
-          amount: val.amount || 0,
-          playerUpi: val.upiId || '',
-          timestamp: val.createdAt ? new Date(val.createdAt).getTime() : Date.now(),
-          status: rawStatus === 'approved' ? 'completed' : (rawStatus as any),
-          rejectionReason: val.adminNotes,
-          userId: val.userId,
-        });
-      });
-      if (items.length > 0) {
-        localStorage.setItem(STORAGE_KEYS.WITHDRAWAL_REQUESTS, JSON.stringify(items));
-        callback({ type: 'WITHDRAWAL_REQUESTED', payload: items, timestamp: Date.now() });
-      }
-    },
-    (err) => {
-      console.warn('Firestore withdrawal requests sub error:', err.message);
-    }
-  );
-
   return () => {
+    syncSubscribers.delete(callback);
     window.removeEventListener('carrom_admin_sync', handleCustomEvent);
     window.removeEventListener('storage', handleStorage);
     if (broadcastChannel) {
       broadcastChannel.removeEventListener('message', handleBroadcast);
     }
-    unsubConfig();
-    unsubSecurity();
-    unsubDeposits();
-    unsubWithdrawals();
+    if (syncSubscribers.size === 0 && pooledUnsubscribe) {
+      pooledUnsubscribe();
+    }
   };
 }
 
@@ -531,8 +598,31 @@ export async function saveAdminSecurity(security: Partial<AdminSecurityConfig>):
 }
 
 /* ==========================================================================
-   REAL-TIME MULTIPLAYER ROOM MATCHMAKING (FIRESTORE BACKED)
+   REAL-TIME MULTIPLAYER ROOM MATCHMAKING (FIRESTORE + HYBRID LOCAL FALLBACK)
    ========================================================================== */
+
+function saveLocalRoom(room: ServerGameRoom) {
+  try {
+    localStorage.setItem(`carrom_room_${room.roomId}`, JSON.stringify(room));
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const channel = new BroadcastChannel(`carrom_room_${room.roomId}`);
+      channel.postMessage(room);
+      channel.close();
+    }
+  } catch {}
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(`carrom_room_${room.roomId}`, { detail: room }));
+  }
+}
+
+function getLocalRoom(roomId: string): ServerGameRoom | null {
+  try {
+    const raw = localStorage.getItem(`carrom_room_${roomId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function createMultiplayerRoom(playerName: string, entryFee: number): Promise<ServerGameRoom> {
   const user = await ensureFirebaseAuth();
@@ -558,11 +648,18 @@ export async function createMultiplayerRoom(playerName: string, entryFee: number
     updatedAt: new Date().toISOString(),
   };
 
+  saveLocalRoom(room);
+
   try {
     await setDoc(doc(db, 'game_rooms', roomId), room);
-    console.log(`[ROOM] Room created successfully: ${roomId}`);
+    console.log(`[ROOM] Room created successfully in Firestore: ${roomId}`);
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `game_rooms/${roomId}`);
+    if (isQuotaError(err)) {
+      notifyQuotaExceeded();
+      console.warn(`[ROOM] Firestore quota exceeded during creation. Operating in local mode for room ${roomId}`);
+    } else {
+      console.warn(`[ROOM] Firestore creation warning for room ${roomId}:`, err);
+    }
   }
 
   return room;
@@ -580,6 +677,51 @@ export async function joinMultiplayerRoom(
   const user = await ensureFirebaseAuth();
   const guestNameInput = playerName.trim() || 'Guest Player';
 
+  // 1. Try local storage / broadcast room first (instant fallback for local tabs/devices or quota limits)
+  let localRoom = getLocalRoom(cleanCode);
+  if (!localRoom && cleanCode.startsWith('CR')) {
+    const numericCode = cleanCode.replace(/^CR/, '');
+    if (numericCode) localRoom = getLocalRoom(numericCode);
+  }
+
+  if (localRoom) {
+    const now = Date.now();
+    let currentGameState: AuthoritativeGameState;
+    try {
+      currentGameState = JSON.parse(localRoom.gameState || '');
+    } catch {
+      currentGameState = createInitialAuthoritativeGameState();
+    }
+    currentGameState.turnStartedAt = now;
+    currentGameState.turnDeadline = now + 20000;
+
+    const mergedRoom: ServerGameRoom = {
+      ...localRoom,
+      guestId: user.uid,
+      guestName: guestNameInput,
+      status: 'MATCHED',
+      gameState: JSON.stringify(currentGameState),
+      updatedAt: new Date().toISOString(),
+    };
+
+    saveLocalRoom(mergedRoom);
+
+    try {
+      await updateDoc(doc(db, 'game_rooms', mergedRoom.roomId), {
+        guestId: user.uid,
+        guestName: guestNameInput,
+        status: 'MATCHED',
+        gameState: mergedRoom.gameState,
+        updatedAt: mergedRoom.updatedAt,
+      });
+    } catch (e) {
+      if (isQuotaError(e)) notifyQuotaExceeded();
+    }
+
+    return { success: true, room: mergedRoom };
+  }
+
+  // 2. Try Firestore lookup & transaction if not in local storage
   try {
     let targetDocRef = doc(db, 'game_rooms', cleanCode);
     let snap = await getDoc(targetDocRef);
@@ -593,11 +735,9 @@ export async function joinMultiplayerRoom(
     }
 
     if (!snap.exists()) {
-      console.warn(`[SERVER] Room ID "${cleanCode}" not found in database.`);
       return { success: false, error: `Room "${roomIdInput.trim()}" not found. Please verify the code with the host.` };
     }
 
-    // Atomic room joining transaction
     const joinedRoom = await runTransaction(db, async (transaction) => {
       const roomSnap = await transaction.get(targetDocRef);
       if (!roomSnap.exists()) {
@@ -605,33 +745,23 @@ export async function joinMultiplayerRoom(
       }
 
       const roomData = roomSnap.data() as ServerGameRoom;
-      console.log(`[SERVER] Room join request received for room ${cleanCode}`);
-      console.log(`[SERVER] Existing room verified: hostName="${roomData.hostName}", hostId="${roomData.hostId}", status="${roomData.status}"`);
 
-      // Creator re-joining their own room directly
       if (roomData.hostId === user.uid && roomData.guestId !== user.uid) {
-        if (roomData.guestName) {
-          console.log(`[SERVER] Host session re-joining matched room ${cleanCode}`);
-          return roomData;
-        }
+        if (roomData.guestName) return roomData;
       }
 
       if (roomData.status !== 'waiting' && (roomData.status as string) !== 'WAITING' && roomData.guestId !== user.uid) {
-        throw new Error(`Room "${cleanCode}" is already in status "${roomData.status}" and cannot be joined.`);
+        throw new Error(`Room "${cleanCode}" is already in status "${roomData.status}".`);
       }
 
       if (roomData.guestId && roomData.guestId !== user.uid) {
-        throw new Error(`Room "${cleanCode}" already has Player 2 (${roomData.guestName}) connected.`);
+        throw new Error(`Room "${cleanCode}" already has Player 2 connected.`);
       }
 
       let currentGameState: AuthoritativeGameState;
-      if (roomData.gameState) {
-        try {
-          currentGameState = JSON.parse(roomData.gameState);
-        } catch {
-          currentGameState = createInitialAuthoritativeGameState();
-        }
-      } else {
+      try {
+        currentGameState = JSON.parse(roomData.gameState || '');
+      } catch {
         currentGameState = createInitialAuthoritativeGameState();
       }
 
@@ -647,8 +777,6 @@ export async function joinMultiplayerRoom(
         updatedAt: new Date().toISOString(),
       };
 
-      console.log(`[SERVER] Player 2 registered: "${guestNameInput}" (UID: ${user.uid})`);
-      console.log(`[SERVER] Room status updated to MATCHED`);
       transaction.update(targetDocRef, updatedFields);
 
       const mergedRoom: ServerGameRoom = {
@@ -656,36 +784,79 @@ export async function joinMultiplayerRoom(
         ...updatedFields,
       };
 
-      console.log(`[SERVER] Both players verified for room ${mergedRoom.roomId}: Host="${mergedRoom.hostName}", Guest="${mergedRoom.guestName}"`);
-      console.log(`[SERVER] Match initialization confirmed`);
-
+      saveLocalRoom(mergedRoom);
       return mergedRoom;
     });
 
     return { success: true, room: joinedRoom };
   } catch (err: any) {
+    if (isQuotaError(err)) {
+      notifyQuotaExceeded();
+    }
     console.error('[SERVER] Room join error:', err);
-    return { success: false, error: err.message || 'Failed to join room. Please check code.' };
+    return { success: false, error: err.message || 'Failed to join room.' };
   }
 }
 
 export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom) => void): () => void {
-  console.log(`[ROOM_LISTEN] Attaching Firestore snapshot listener for game_rooms/${roomId}`);
-  return onSnapshot(
+  console.log(`[ROOM_LISTEN] Attaching listener for game_rooms/${roomId}`);
+
+  let channel: BroadcastChannel | null = null;
+  const handleMessage = (e: MessageEvent) => {
+    if (e.data) callback(e.data);
+  };
+
+  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+    try {
+      channel = new BroadcastChannel(`carrom_room_${roomId}`);
+      channel.addEventListener('message', handleMessage);
+    } catch {
+      channel = null;
+    }
+  }
+
+  const handleCustomEvent = (e: Event) => {
+    const custom = e as CustomEvent<ServerGameRoom>;
+    if (custom.detail) callback(custom.detail);
+  };
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener(`carrom_room_${roomId}`, handleCustomEvent);
+  }
+
+  const initialLocal = getLocalRoom(roomId);
+  if (initialLocal) {
+    callback(initialLocal);
+  }
+
+  const unsubFirestore = onSnapshot(
     doc(db, 'game_rooms', roomId),
     (snap) => {
       if (snap.exists()) {
         const roomData = snap.data() as ServerGameRoom;
-        console.log(`[ROOM_LISTEN] Snapshot for room ${roomId}: status="${roomData.status}", hostName="${roomData.hostName}", guestName="${roomData.guestName || 'UNDEFINED'}", guestId="${roomData.guestId || 'UNDEFINED'}"`);
+        saveLocalRoom(roomData);
         callback(roomData);
-      } else {
-        console.warn(`[ROOM_LISTEN] Snapshot triggered for room ${roomId} but document does not exist.`);
       }
     },
     (err) => {
-      console.warn(`[ROOM_LISTEN] Room subscription error for ${roomId}:`, err.message);
+      if (isQuotaError(err)) {
+        notifyQuotaExceeded();
+      } else {
+        console.warn(`[ROOM_LISTEN] Room subscription error for ${roomId}:`, err.message);
+      }
     }
   );
+
+  return () => {
+    if (channel) {
+      channel.removeEventListener('message', handleMessage);
+      channel.close();
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(`carrom_room_${roomId}`, handleCustomEvent);
+    }
+    unsubFirestore();
+  };
 }
 
 export async function updateRoomGameState(
@@ -695,19 +866,29 @@ export async function updateRoomGameState(
   status?: 'waiting' | 'active' | 'finished',
   winner?: string
 ): Promise<void> {
+  const currentLocal = getLocalRoom(roomId);
+  const updatedPayload: any = {
+    gameState: typeof gameState === 'string' ? gameState : JSON.stringify(gameState),
+    updatedAt: new Date().toISOString(),
+  };
+  if (turn) updatedPayload.turn = turn;
+  if (status) updatedPayload.status = status;
+  if (winner) updatedPayload.winner = winner;
+
+  if (currentLocal) {
+    const merged = { ...currentLocal, ...updatedPayload };
+    saveLocalRoom(merged);
+  }
+
   try {
     const docRef = doc(db, 'game_rooms', roomId);
-    const updatePayload: any = {
-      gameState: typeof gameState === 'string' ? gameState : JSON.stringify(gameState),
-      updatedAt: new Date().toISOString(),
-    };
-    if (turn) updatePayload.turn = turn;
-    if (status) updatePayload.status = status;
-    if (winner) updatePayload.winner = winner;
-
-    await updateDoc(docRef, updatePayload);
+    await updateDoc(docRef, updatedPayload);
   } catch (err) {
-    console.warn('Failed to update room state:', err);
+    if (isQuotaError(err)) {
+      notifyQuotaExceeded();
+    } else {
+      console.warn('Failed to update room state in Firestore:', err);
+    }
   }
 }
 
@@ -759,16 +940,51 @@ export function getPlayerWallet(playerName?: string): PlayerWalletData {
   }
 }
 
+function safeSetItem(key: string, value: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (err: any) {
+    if (err?.name === 'QuotaExceededError' || err?.code === 22 || String(err).includes('QuotaExceededError')) {
+      console.warn(`[STORAGE] LocalStorage quota exceeded for "${key}". Pruning old storage items...`);
+      try {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k !== key && k !== STORAGE_KEYS.WALLET && (k.startsWith('carrom_wallet_') || k.startsWith('carrom_room_'))) {
+            keysToRemove.push(k);
+          }
+        }
+        keysToRemove.forEach((k) => localStorage.removeItem(k));
+        localStorage.setItem(key, value);
+        return true;
+      } catch {
+        console.warn(`[STORAGE] Could not persist key "${key}" to LocalStorage due to space constraints.`);
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
 export async function savePlayerWallet(wallet: PlayerWalletData, playerName?: string, broadcast: boolean = true): Promise<void> {
   if (typeof window === 'undefined') return;
 
   try {
+    const rawTxns = Array.isArray(wallet.transactions) ? wallet.transactions : [];
+    // Sanitize transactions: strip huge base64 screenshot strings and cap at 25 items to conserve LocalStorage
+    const sanitizedTxns: PlayerTransaction[] = rawTxns.slice(0, 25).map((t) => {
+      const { screenshotUrl, ...rest } = t as any;
+      return rest;
+    });
+
     const sanitized: PlayerWalletData = {
       realBalance: Math.max(0, Number(wallet.realBalance) || 0),
       totalWon: Number(wallet.totalWon) || 0,
       matchesPlayed: Number(wallet.matchesPlayed) || 0,
       matchesWon: Number(wallet.matchesWon) || 0,
-      transactions: Array.isArray(wallet.transactions) ? wallet.transactions : [],
+      transactions: sanitizedTxns,
     };
 
     const serialized = JSON.stringify(sanitized);
@@ -777,9 +993,9 @@ export async function savePlayerWallet(wallet: PlayerWalletData, playerName?: st
     const prevPlayer = localStorage.getItem(playerKey);
     const prevGlobal = localStorage.getItem(STORAGE_KEYS.WALLET);
 
-    localStorage.setItem(STORAGE_KEYS.WALLET, serialized);
-    if (playerName && playerName.trim()) {
-      localStorage.setItem(playerKey, serialized);
+    safeSetItem(STORAGE_KEYS.WALLET, serialized);
+    if (playerName && playerName.trim() && playerName.trim().length >= 2) {
+      safeSetItem(playerKey, serialized);
     }
 
     const hasChanged = prevPlayer !== serialized || prevGlobal !== serialized;
@@ -886,7 +1102,11 @@ export async function submitDepositRequest(params: {
       createdAt: new Date().toISOString(),
     });
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `deposit_requests/${requestId}`);
+    if (isQuotaError(err)) {
+      notifyQuotaExceeded();
+    } else {
+      console.warn(`[DEPOSIT] Firestore deposit request write error for ${requestId}:`, err);
+    }
   }
 
   return newRequest;
@@ -922,6 +1142,34 @@ export async function updateDepositStatus(
       status: status === 'completed' ? 'approved' : 'rejected',
       adminNotes: rejectionReason || '',
     });
+
+    // Cross-device server wallet balance sync for target user
+    if (target.userId) {
+      const userRef = doc(db, 'users', target.userId);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        const currentDeposit = Number(userData.depositCoins) || 0;
+        const currentWithdraw = Number(userData.withdrawableCoins) || 0;
+        if (status === 'completed') {
+          await updateDoc(userRef, {
+            depositCoins: currentDeposit + target.amount,
+            withdrawableCoins: currentWithdraw + target.amount,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      } else if (status === 'completed') {
+        await setDoc(userRef, {
+          userId: target.userId,
+          depositCoins: target.amount,
+          bonusCoins: 0,
+          withdrawableCoins: target.amount,
+          totalMatches: 0,
+          wins: 0,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
   } catch (err) {
     console.warn('Failed to update deposit status in Firestore:', err);
   }
@@ -929,11 +1177,19 @@ export async function updateDepositStatus(
   return target;
 }
 
-export function deleteDepositRequest(requestId: string): boolean {
+export async function deleteDepositRequest(requestId: string): Promise<boolean> {
   const requests = getDepositRequests();
   const updated = requests.filter((r) => r.id !== requestId);
   localStorage.setItem(STORAGE_KEYS.DEPOSIT_REQUESTS, JSON.stringify(updated));
   broadcastSync('DEPOSIT_STATUS_UPDATED', { deletedId: requestId });
+
+  try {
+    await ensureFirebaseAuth();
+    await deleteDoc(doc(db, 'deposit_requests', requestId));
+    console.log(`[FIRESTORE] Permanently deleted deposit_requests/${requestId}`);
+  } catch (err) {
+    console.warn(`Failed to delete deposit_requests/${requestId} in Firestore:`, err);
+  }
   return true;
 }
 
@@ -1014,7 +1270,11 @@ export async function submitWithdrawalRequest(params: {
       createdAt: new Date().toISOString(),
     });
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `withdrawal_requests/${requestId}`);
+    if (isQuotaError(err)) {
+      notifyQuotaExceeded();
+    } else {
+      console.warn(`[WITHDRAWAL] Firestore withdrawal request write error for ${requestId}:`, err);
+    }
   }
 
   return { success: true, request: newRequest };
@@ -1050,6 +1310,22 @@ export async function updateWithdrawalStatus(
       status: status === 'completed' ? 'approved' : 'rejected',
       adminNotes: rejectionReason || '',
     });
+
+    // Cross-device refund sync if rejected by admin
+    if (status === 'rejected' && target.userId) {
+      const userRef = doc(db, 'users', target.userId);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        const currentDeposit = Number(userData.depositCoins) || 0;
+        const currentWithdraw = Number(userData.withdrawableCoins) || 0;
+        await updateDoc(userRef, {
+          depositCoins: currentDeposit + target.amount,
+          withdrawableCoins: currentWithdraw + target.amount,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
   } catch (err) {
     console.warn('Failed to update withdrawal status in Firestore:', err);
   }
@@ -1057,7 +1333,7 @@ export async function updateWithdrawalStatus(
   return target;
 }
 
-export function deleteWithdrawalRequest(requestId: string): boolean {
+export async function deleteWithdrawalRequest(requestId: string): Promise<boolean> {
   const requests = getWithdrawalRequests();
   const target = requests.find((r) => r.id === requestId);
   if (target && target.status === 'pending') {
@@ -1066,7 +1342,42 @@ export function deleteWithdrawalRequest(requestId: string): boolean {
   const updated = requests.filter((r) => r.id !== requestId);
   localStorage.setItem(STORAGE_KEYS.WITHDRAWAL_REQUESTS, JSON.stringify(updated));
   broadcastSync('WITHDRAWAL_STATUS_UPDATED', { deletedId: requestId });
+
+  try {
+    await ensureFirebaseAuth();
+    await deleteDoc(doc(db, 'withdrawal_requests', requestId));
+    console.log(`[FIRESTORE] Permanently deleted withdrawal_requests/${requestId}`);
+  } catch (err) {
+    console.warn(`Failed to delete withdrawal_requests/${requestId} in Firestore:`, err);
+  }
   return true;
+}
+
+export function subscribeToUserWallet(
+  userId: string,
+  callback: (data: { depositCoins: number; withdrawableCoins: number; totalMatches: number; wins: number }) => void
+): () => void {
+  return onSnapshot(
+    doc(db, 'users', userId),
+    (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        callback({
+          depositCoins: Number(data.depositCoins) || 0,
+          withdrawableCoins: Number(data.withdrawableCoins) ?? Number(data.depositCoins) ?? 0,
+          totalMatches: Number(data.totalMatches) || 0,
+          wins: Number(data.wins) || 0,
+        });
+      }
+    },
+    (err) => {
+      if (isQuotaError(err)) {
+        notifyQuotaExceeded();
+      } else {
+        console.warn('Firestore user wallet subscription error:', err.message);
+      }
+    }
+  );
 }
 
 /* ==========================================================================
