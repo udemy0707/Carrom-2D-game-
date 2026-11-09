@@ -17,6 +17,7 @@ import {
   updateDoc,
   collection,
   onSnapshot,
+  runTransaction,
 } from 'firebase/firestore';
 
 export interface AdminDepositConfig {
@@ -78,6 +79,140 @@ export interface AdminSecurityConfig {
   urlSlug: string;
 }
 
+export interface AuthoritativeCoin {
+  id: number;
+  type: 'white' | 'black' | 'queen';
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  isPocketed: boolean;
+}
+
+export interface AuthoritativeStriker {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  isPocketed: boolean;
+}
+
+export interface AuthoritativeShot {
+  shooterName: string;
+  shooterRole: 'host' | 'guest';
+  strikerX: number;
+  vx: number;
+  vy: number;
+  power: number;
+  timestamp: number;
+  sequenceNumber: number;
+}
+
+export interface AuthoritativeGameState {
+  version: number;
+  sequenceNumber: number;
+  gameStatus: 'playing' | 'finished';
+  currentTurn: 'host' | 'guest';
+  turnStartedAt: number;
+  turnDeadline: number;
+  turnDuration: number;
+  hostScore: number;  // White coins pocketed
+  guestScore: number; // Black coins pocketed
+  queenState: 'on_board' | 'pending_host' | 'pending_guest' | 'covered_host' | 'covered_guest';
+  coins: AuthoritativeCoin[];
+  striker: AuthoritativeStriker;
+  lastShot?: AuthoritativeShot;
+  winnerRole?: 'host' | 'guest';
+  winnerName?: string;
+  prizeWon?: number;
+  rakeDeducted?: number;
+}
+
+export function createInitialAuthoritativeGameState(): AuthoritativeGameState {
+  const COIN_RADIUS = 16.5;
+  const PLAYER_BASELINE_Y = 648;
+
+  const coins: AuthoritativeCoin[] = [];
+  let id = 1;
+
+  // Center Red Queen
+  coins.push({
+    id: id++,
+    type: 'queen',
+    x: 400,
+    y: 400,
+    vx: 0,
+    vy: 0,
+    isPocketed: false,
+  });
+
+  // Ring 1 (6 coins around queen: 3 White, 3 Black alternating)
+  const r1Dist = COIN_RADIUS * 2.05;
+  for (let i = 0; i < 6; i++) {
+    const angle = (i * Math.PI) / 3;
+    coins.push({
+      id: id++,
+      type: i % 2 === 0 ? 'white' : 'black',
+      x: Math.round((400 + Math.cos(angle) * r1Dist) * 100) / 100,
+      y: Math.round((400 + Math.sin(angle) * r1Dist) * 100) / 100,
+      vx: 0,
+      vy: 0,
+      isPocketed: false,
+    });
+  }
+
+  // Ring 2 (12 coins in standard arrangement: 6 White, 6 Black)
+  const r2CornerDist = COIN_RADIUS * 4.1;
+  for (let i = 0; i < 6; i++) {
+    const angle = (i * Math.PI) / 3;
+    coins.push({
+      id: id++,
+      type: i % 2 === 0 ? 'black' : 'white',
+      x: Math.round((400 + Math.cos(angle) * r2CornerDist) * 100) / 100,
+      y: Math.round((400 + Math.sin(angle) * r2CornerDist) * 100) / 100,
+      vx: 0,
+      vy: 0,
+      isPocketed: false,
+    });
+  }
+
+  const r2EdgeDist = COIN_RADIUS * 2.05 * Math.sqrt(3);
+  for (let i = 0; i < 6; i++) {
+    const angle = (i * Math.PI) / 3 + Math.PI / 6;
+    coins.push({
+      id: id++,
+      type: i % 2 === 0 ? 'white' : 'black',
+      x: Math.round((400 + Math.cos(angle) * r2EdgeDist) * 100) / 100,
+      y: Math.round((400 + Math.sin(angle) * r2EdgeDist) * 100) / 100,
+      vx: 0,
+      vy: 0,
+      isPocketed: false,
+    });
+  }
+
+  const now = Date.now();
+  return {
+    version: 1,
+    sequenceNumber: 1,
+    gameStatus: 'playing',
+    currentTurn: 'host',
+    turnStartedAt: now,
+    turnDeadline: now + 20000,
+    turnDuration: 20,
+    hostScore: 0,
+    guestScore: 0,
+    queenState: 'on_board',
+    coins,
+    striker: {
+      x: 400,
+      y: PLAYER_BASELINE_Y,
+      vx: 0,
+      vy: 0,
+      isPocketed: false,
+    },
+  };
+}
+
 export interface ServerGameRoom {
   roomId: string;
   hostId: string;
@@ -88,7 +223,7 @@ export interface ServerGameRoom {
   totalPot: number;
   winnerPrize: number;
   platformRake: number;
-  status: 'waiting' | 'active' | 'finished';
+  status: 'waiting' | 'active' | 'MATCHED' | 'finished';
   turn: 'host' | 'guest';
   gameState?: string;
   winner?: string;
@@ -406,6 +541,8 @@ export async function createMultiplayerRoom(playerName: string, entryFee: number
   const platformRake = Math.round(totalPot * 0.1);
   const winnerPrize = totalPot - platformRake;
 
+  console.log(`[ROOM] Creating room with ID ${roomId} for host "${playerName}" (UID: ${user.uid})...`);
+
   const room: ServerGameRoom = {
     roomId,
     hostId: user.uid,
@@ -416,12 +553,14 @@ export async function createMultiplayerRoom(playerName: string, entryFee: number
     platformRake,
     status: 'waiting',
     turn: 'host',
+    gameState: JSON.stringify(createInitialAuthoritativeGameState()),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
   try {
     await setDoc(doc(db, 'game_rooms', roomId), room);
+    console.log(`[ROOM] Room created successfully: ${roomId}`);
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `game_rooms/${roomId}`);
   }
@@ -439,63 +578,112 @@ export async function joinMultiplayerRoom(
   }
 
   const user = await ensureFirebaseAuth();
+  const guestNameInput = playerName.trim() || 'Guest Player';
 
   try {
-    let docRef = doc(db, 'game_rooms', cleanCode);
-    let snap = await getDoc(docRef);
+    let targetDocRef = doc(db, 'game_rooms', cleanCode);
+    let snap = await getDoc(targetDocRef);
 
     if (!snap.exists() && cleanCode.startsWith('CR')) {
       const numericCode = cleanCode.replace(/^CR/, '');
       if (numericCode) {
-        docRef = doc(db, 'game_rooms', numericCode);
-        snap = await getDoc(docRef);
+        targetDocRef = doc(db, 'game_rooms', numericCode);
+        snap = await getDoc(targetDocRef);
       }
     }
 
     if (!snap.exists()) {
+      console.warn(`[SERVER] Room ID "${cleanCode}" not found in database.`);
       return { success: false, error: `Room "${roomIdInput.trim()}" not found. Please verify the code with the host.` };
     }
 
-    const data = snap.data() as ServerGameRoom;
-    if (data.status !== 'waiting' && data.hostId !== user.uid) {
-      return { success: false, error: `Room "${cleanCode}" is already full or completed.` };
-    }
+    // Atomic room joining transaction
+    const joinedRoom = await runTransaction(db, async (transaction) => {
+      const roomSnap = await transaction.get(targetDocRef);
+      if (!roomSnap.exists()) {
+        throw new Error(`Room "${cleanCode}" no longer exists.`);
+      }
 
-    if (data.hostId === user.uid) {
-      return { success: true, room: data };
-    }
+      const roomData = roomSnap.data() as ServerGameRoom;
+      console.log(`[SERVER] Room join request received for room ${cleanCode}`);
+      console.log(`[SERVER] Existing room verified: hostName="${roomData.hostName}", hostId="${roomData.hostId}", status="${roomData.status}"`);
 
-    const updatedData = {
-      guestId: user.uid,
-      guestName: playerName.trim() || 'Guest Player',
-      status: 'active' as const,
-      updatedAt: new Date().toISOString(),
-    };
+      // Creator re-joining their own room directly
+      if (roomData.hostId === user.uid && roomData.guestId !== user.uid) {
+        if (roomData.guestName) {
+          console.log(`[SERVER] Host session re-joining matched room ${cleanCode}`);
+          return roomData;
+        }
+      }
 
-    await updateDoc(docRef, updatedData);
+      if (roomData.status !== 'waiting' && (roomData.status as string) !== 'WAITING' && roomData.guestId !== user.uid) {
+        throw new Error(`Room "${cleanCode}" is already in status "${roomData.status}" and cannot be joined.`);
+      }
 
-    const fullRoom: ServerGameRoom = {
-      ...data,
-      ...updatedData,
-    };
+      if (roomData.guestId && roomData.guestId !== user.uid) {
+        throw new Error(`Room "${cleanCode}" already has Player 2 (${roomData.guestName}) connected.`);
+      }
 
-    return { success: true, room: fullRoom };
-  } catch (err) {
-    console.error('Error joining room:', err);
-    return { success: false, error: 'Failed to join room. Please check code.' };
+      let currentGameState: AuthoritativeGameState;
+      if (roomData.gameState) {
+        try {
+          currentGameState = JSON.parse(roomData.gameState);
+        } catch {
+          currentGameState = createInitialAuthoritativeGameState();
+        }
+      } else {
+        currentGameState = createInitialAuthoritativeGameState();
+      }
+
+      const now = Date.now();
+      currentGameState.turnStartedAt = now;
+      currentGameState.turnDeadline = now + 20000;
+
+      const updatedFields: Partial<ServerGameRoom> = {
+        guestId: user.uid,
+        guestName: guestNameInput,
+        status: 'MATCHED',
+        gameState: JSON.stringify(currentGameState),
+        updatedAt: new Date().toISOString(),
+      };
+
+      console.log(`[SERVER] Player 2 registered: "${guestNameInput}" (UID: ${user.uid})`);
+      console.log(`[SERVER] Room status updated to MATCHED`);
+      transaction.update(targetDocRef, updatedFields);
+
+      const mergedRoom: ServerGameRoom = {
+        ...roomData,
+        ...updatedFields,
+      };
+
+      console.log(`[SERVER] Both players verified for room ${mergedRoom.roomId}: Host="${mergedRoom.hostName}", Guest="${mergedRoom.guestName}"`);
+      console.log(`[SERVER] Match initialization confirmed`);
+
+      return mergedRoom;
+    });
+
+    return { success: true, room: joinedRoom };
+  } catch (err: any) {
+    console.error('[SERVER] Room join error:', err);
+    return { success: false, error: err.message || 'Failed to join room. Please check code.' };
   }
 }
 
 export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom) => void): () => void {
+  console.log(`[ROOM_LISTEN] Attaching Firestore snapshot listener for game_rooms/${roomId}`);
   return onSnapshot(
     doc(db, 'game_rooms', roomId),
     (snap) => {
       if (snap.exists()) {
-        callback(snap.data() as ServerGameRoom);
+        const roomData = snap.data() as ServerGameRoom;
+        console.log(`[ROOM_LISTEN] Snapshot for room ${roomId}: status="${roomData.status}", hostName="${roomData.hostName}", guestName="${roomData.guestName || 'UNDEFINED'}", guestId="${roomData.guestId || 'UNDEFINED'}"`);
+        callback(roomData);
+      } else {
+        console.warn(`[ROOM_LISTEN] Snapshot triggered for room ${roomId} but document does not exist.`);
       }
     },
     (err) => {
-      console.warn('Room subscription error:', err.message);
+      console.warn(`[ROOM_LISTEN] Room subscription error for ${roomId}:`, err.message);
     }
   );
 }

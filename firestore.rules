@@ -53,7 +53,7 @@ service cloud.firestore {
 
     function isValidGameRoom(data) {
       return data.roomId is string &&
-        data.status in ['waiting', 'active', 'finished'];
+        data.status in ['WAITING', 'MATCHED', 'READY', 'PLAYING', 'COMPLETED', 'waiting', 'active', 'finished'];
     }
 
     // Rules for Users collection

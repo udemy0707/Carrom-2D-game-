@@ -55,7 +55,12 @@ import {
   joinMultiplayerRoom,
   subscribeToRoom,
   updateRoomGameState,
-  ServerGameRoom
+  ServerGameRoom,
+  AuthoritativeGameState,
+  AuthoritativeCoin,
+  AuthoritativeStriker,
+  AuthoritativeShot,
+  createInitialAuthoritativeGameState
 } from './services/adminSync';
 
 /* ==========================================================================
@@ -397,6 +402,30 @@ const BETTING_AMOUNTS = [50, 100, 200, 500, 1000, 2000];
 
 type CoinType = 'white' | 'black' | 'queen';
 type QueenState = 'on_board' | 'pending_player' | 'pending_bot' | 'covered_player' | 'covered_bot';
+
+function toAuthoritativeQueenState(
+  q: QueenState,
+  isLocalHost: boolean
+): 'on_board' | 'pending_host' | 'pending_guest' | 'covered_host' | 'covered_guest' {
+  if (q === 'on_board') return 'on_board';
+  if (q === 'pending_player') return isLocalHost ? 'pending_host' : 'pending_guest';
+  if (q === 'pending_bot') return isLocalHost ? 'pending_guest' : 'pending_host';
+  if (q === 'covered_player') return isLocalHost ? 'covered_host' : 'covered_guest';
+  if (q === 'covered_bot') return isLocalHost ? 'covered_guest' : 'covered_host';
+  return 'on_board';
+}
+
+function fromAuthoritativeQueenState(
+  q: 'on_board' | 'pending_host' | 'pending_guest' | 'covered_host' | 'covered_guest',
+  isLocalHost: boolean
+): QueenState {
+  if (q === 'on_board') return 'on_board';
+  if (q === 'pending_host') return isLocalHost ? 'pending_player' : 'pending_bot';
+  if (q === 'pending_guest') return isLocalHost ? 'pending_bot' : 'pending_player';
+  if (q === 'covered_host') return isLocalHost ? 'covered_player' : 'covered_bot';
+  if (q === 'covered_guest') return isLocalHost ? 'covered_bot' : 'covered_player';
+  return 'on_board';
+}
 
 interface Coin {
   id: number;
@@ -817,6 +846,9 @@ export default function App() {
     status: 'playing',
   });
 
+  // Matchmaking mode: PRIVATE_ROOM vs COMPUTER AI
+  const [matchmakingMode, setMatchmakingMode] = useState<'PRIVATE_ROOM' | 'COMPUTER'>('COMPUTER');
+
   // Create Game Selection State (Betting Options: 50, 100, 200, 500, 1000, 2000)
   const [selectedBet, setSelectedBet] = useState<number>(500);
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
@@ -859,7 +891,55 @@ export default function App() {
 
   const [currentTurn, setCurrentTurn] = useState<'player' | 'bot'>('player');
   const [isStrikerMoving, setIsStrikerMoving] = useState(false);
+  const [isStrikerAnimating, setIsStrikerAnimating] = useState(false);
   const [strikerX, setStrikerX] = useState<number>(400);
+
+  // Smooth Striker Return-to-Baseline Animation Ref (~380ms)
+  const strikerReturnAnimRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    targetX: number;
+    targetY: number;
+    startTime: number;
+    duration: number;
+  }>({
+    active: false,
+    startX: 400,
+    startY: PLAYER_BASELINE_Y,
+    targetX: 400,
+    targetY: PLAYER_BASELINE_Y,
+    startTime: 0,
+    duration: 380,
+  });
+
+  const triggerStrikerReturnAnimation = useCallback((targetX: number, targetY: number) => {
+    const s = strikerRef.current;
+    const anim = strikerReturnAnimRef.current;
+    if (anim.active && Math.abs(anim.targetX - targetX) < 1 && Math.abs(anim.targetY - targetY) < 1) {
+      return;
+    }
+
+    const dist = Math.hypot(s.x - targetX, s.y - targetY);
+    if (dist < 2) {
+      s.x = targetX;
+      s.y = targetY;
+      anim.active = false;
+      setIsStrikerAnimating(false);
+      return;
+    }
+
+    strikerReturnAnimRef.current = {
+      active: true,
+      startX: s.x,
+      startY: s.y,
+      targetX,
+      targetY,
+      startTime: performance.now(),
+      duration: 380,
+    };
+    setIsStrikerAnimating(true);
+  }, []);
 
   // Dragging & Force Indicator state
   const [isDraggingStriker, setIsDraggingStriker] = useState(false);
@@ -895,6 +975,11 @@ export default function App() {
     type: 'restart' | 'rematch';
     status: 'requesting' | 'approved' | 'declined';
   } | null>(null);
+
+  // Authoritative State Tracking Refs for 100% Real-Time Multiplayer Sync
+  const authoritativeSequenceRef = useRef<number>(0);
+  const authoritativeDeadlineRef = useRef<number>(Date.now() + 20000);
+  const lastShotSequenceRef = useRef<number>(0);
 
   // Refs for 60fps canvas loop
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1243,6 +1328,14 @@ export default function App() {
      STARTING MATCH WITH WALLET DEDUCTION & COMMISSION RAKE
      ========================================================================== */
   const startMatchWithBet = (room: GameRoom) => {
+    // Guard: Prevent AI game initialization when matchmakingMode is PRIVATE_ROOM
+    if (room.opponentName === 'Computer' || room.opponentName === 'Bot') {
+      if (matchmakingMode !== 'COMPUTER') {
+        console.warn(`[MATCH_INIT_GUARD] AI match blocked! opponentName="${room.opponentName}" but matchmakingMode="${matchmakingMode}". Remaining in PRIVATE_ROOM waiting mode.`);
+        return;
+      }
+    }
+
     if (room.betAmount > 0) {
       if (wallet.realBalance < room.betAmount) {
         setInsufficientBalanceNotice({
@@ -1346,7 +1439,9 @@ export default function App() {
 
     try {
       setIsCreatingRoom(true);
+      setMatchmakingMode('PRIVATE_ROOM');
       const serverRoom = await createMultiplayerRoom(playerName, selectedBet);
+      console.log(`[HOST] Room created: ${serverRoom.roomId}`);
       const newRoom: GameRoom = {
         gameId: serverRoom.roomId,
         hostName: serverRoom.hostName,
@@ -1372,14 +1467,28 @@ export default function App() {
     if (screen !== 'room_waiting' || !activeRoom.gameId) return;
 
     let isTransitioned = false;
+    console.log(`[HOST] Room subscription initialized`);
+    console.log(`[HOST] Listening for room changes`);
+
     const unsub = subscribeToRoom(activeRoom.gameId, (serverRoom) => {
-      if (!isTransitioned && serverRoom.status === 'active' && serverRoom.guestName) {
+      console.log(`[HOST] Room update received`);
+
+      const isMatchedStatus = serverRoom.status === 'MATCHED' || serverRoom.status === 'active' || (serverRoom.status as string) === 'MATCHED';
+      const hasGuestName = Boolean(serverRoom.guestName && serverRoom.guestName.trim());
+
+      if (!isTransitioned && isMatchedStatus && hasGuestName) {
         isTransitioned = true;
-        setOpponentName(serverRoom.guestName);
+        console.log(`[HOST] Player 2 detected: ${serverRoom.guestName}`);
+        console.log(`[HOST] Room status: ${serverRoom.status}`);
+        console.log(`[HOST] Both players verified`);
+        console.log(`[HOST] Transitioning to multiplayer game`);
+
+        setMatchmakingMode('PRIVATE_ROOM');
+        setOpponentName(serverRoom.guestName!);
         const fullRoom: GameRoom = {
           gameId: serverRoom.roomId,
           hostName: serverRoom.hostName,
-          opponentName: serverRoom.guestName,
+          opponentName: serverRoom.guestName!,
           betAmount: serverRoom.entryFee,
           totalPot: serverRoom.totalPot,
           winnerPrize: serverRoom.winnerPrize,
@@ -1416,13 +1525,23 @@ export default function App() {
 
     try {
       setIsJoiningRoom(true);
+      setMatchmakingMode('PRIVATE_ROOM');
+      console.log(`[JOINER] Entered Room ID: ${code}`);
+
       const res = await joinMultiplayerRoom(code, playerName);
       if (!res.success || !res.room) {
+        console.warn(`[JOINER] Room join failed for code "${code}": ${res.error}`);
         setJoinRoomErrorMsg(res.error || 'Failed to join room. Please check the code.');
         return;
       }
 
       const sRoom = res.room;
+      console.log(`[JOINER] Room found: game_rooms/${sRoom.roomId}`);
+      console.log(`[JOINER] Room availability verified`);
+      console.log(`[JOINER] Player registration successful`);
+      console.log(`[JOINER] Room status updated: ${sRoom.status}`);
+      console.log(`[JOINER] Waiting for authoritative game confirmation`);
+
       const joinedRoom: GameRoom = {
         gameId: sRoom.roomId,
         hostName: sRoom.hostName,
@@ -1435,6 +1554,8 @@ export default function App() {
       };
 
       setOpponentName(sRoom.hostName);
+      console.log(`[JOINER] Multiplayer session confirmed`);
+      console.log(`[JOINER] Entering game`);
       startMatchWithBet(joinedRoom);
     } catch (err) {
       console.error('Failed to join server room:', err);
@@ -1444,41 +1565,98 @@ export default function App() {
     }
   };
 
-  // Real-time Opponent Shot Listener during active Multiplayer gameplay
+  // Authoritative Real-Time Multiplayer State & Opponent Shot Listener during gameplay
   useEffect(() => {
     if (screen !== 'gameplay' || !activeRoom.gameId) return;
 
-    let lastHandledShotTime = 0;
     const unsub = subscribeToRoom(activeRoom.gameId, (serverRoom) => {
-      if (serverRoom.gameState) {
-        try {
-          const parsed = JSON.parse(serverRoom.gameState);
-          if (parsed.shot && parsed.shot.shooter !== playerName && parsed.shot.timestamp > lastHandledShotTime) {
-            lastHandledShotTime = parsed.shot.timestamp;
-            const s = strikerRef.current;
-            if (!isTurnInProgressRef.current) {
-              s.x = parsed.shot.strikerX ?? 400;
-              s.vx = parsed.shot.vx;
-              s.vy = parsed.shot.vy;
-              isTurnInProgressRef.current = true;
-              setIsStrikerMoving(true);
-              soundEngine.playStrikerHit(parsed.shot.power || 0.8);
-            }
-          }
-          if (parsed.turn) {
-            setCurrentTurn(parsed.turn);
-            currentTurnRef.current = parsed.turn;
-          }
-        } catch (e) {
-          // Guard for parse
+      if (!serverRoom.gameState) return;
+
+      try {
+        const parsed: AuthoritativeGameState = typeof serverRoom.gameState === 'string'
+          ? JSON.parse(serverRoom.gameState)
+          : serverRoom.gameState;
+
+        const isLocalHost = activeRoom.hostName === playerName;
+
+        // 1. Sync turn deadline
+        if (parsed.turnDeadline) {
+          authoritativeDeadlineRef.current = parsed.turnDeadline;
         }
+
+        // 2. Sync turn & trigger smooth striker return animation on turn transition
+        if (parsed.currentTurn) {
+          const isHostTurn = parsed.currentTurn === 'host';
+          const isMyTurn = isLocalHost ? isHostTurn : !isHostTurn;
+          const newTurn: 'player' | 'bot' = isMyTurn ? 'player' : 'bot';
+
+          if (currentTurnRef.current !== newTurn) {
+            currentTurnRef.current = newTurn;
+            setCurrentTurn(newTurn);
+
+            const targetY = newTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
+            const targetX = newTurn === 'player' ? strikerX : 400;
+            triggerStrikerReturnAnimation(targetX, targetY);
+          }
+        }
+
+        // 3. Sync scores & queen state
+        if (typeof parsed.hostScore === 'number' && typeof parsed.guestScore === 'number') {
+          if (isLocalHost) {
+            setPlayerWhitePocketed(parsed.hostScore);
+            setBotBlackPocketed(parsed.guestScore);
+          } else {
+            setPlayerWhitePocketed(parsed.guestScore);
+            setBotBlackPocketed(parsed.hostScore);
+          }
+        }
+
+        if (parsed.queenState) {
+          setQueenState(fromAuthoritativeQueenState(parsed.queenState, isLocalHost));
+        }
+
+        // 4. Sync coin positions if not currently running local physics turn simulation
+        if (Array.isArray(parsed.coins) && parsed.coins.length > 0) {
+          if (!isTurnInProgressRef.current) {
+            const currentCoins = coinsRef.current;
+            parsed.coins.forEach((authCoin) => {
+              const match = currentCoins.find((c) => c.id === authCoin.id);
+              if (match) {
+                match.x = authCoin.x;
+                match.y = authCoin.y;
+                match.vx = authCoin.vx;
+                match.vy = authCoin.vy;
+                match.isPocketed = authCoin.isPocketed;
+                if (authCoin.isPocketed) match.isSinking = false;
+              }
+            });
+          }
+        }
+
+        // 5. Process opponent shot
+        if (parsed.lastShot && parsed.lastShot.sequenceNumber > lastShotSequenceRef.current) {
+          lastShotSequenceRef.current = parsed.lastShot.sequenceNumber;
+          if (parsed.lastShot.shooterName !== playerName) {
+            const shot = parsed.lastShot;
+            const s = strikerRef.current;
+            s.x = shot.strikerX;
+            s.y = shot.shooterRole === 'guest' ? BOT_BASELINE_Y : PLAYER_BASELINE_Y;
+            s.vx = shot.vx;
+            s.vy = shot.vy;
+            isTurnInProgressRef.current = true;
+            setIsStrikerMoving(true);
+            soundEngine.playStrikerHit(shot.power || 0.8);
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to parse authoritative room gameState:', e);
       }
     });
 
     return () => {
       if (unsub) unsub();
     };
-  }, [screen, activeRoom.gameId, playerName]);
+  }, [screen, activeRoom.gameId, playerName, activeRoom.hostName]);
 
   /* ==========================================================================
      PHYSICS SIMULATION STEP (RULE 1: STRONGER FRAME LOGIC & RULE 2: FAIR POCKETS)
@@ -1870,27 +2048,69 @@ export default function App() {
     setIdleSeconds(0);
     lastActivityTimeRef.current = Date.now();
 
-    // Reset striker
+    // Trigger smooth striker return-to-baseline animation
     const nextBaseY = nextWho === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
-    strikerRef.current = {
-      ...strikerRef.current,
-      x: 400,
-      y: nextBaseY,
-      vx: 0,
-      vy: 0,
-      isSinking: false,
-      sinkScale: 1,
-      isPocketed: false,
-    };
-    setStrikerX(400);
+    const nextBaseX = nextWho === 'player' ? strikerX : 400;
+    triggerStrikerReturnAnimation(nextBaseX, nextBaseY);
 
-    // Bot Shot Execution
-    if (nextWho === 'bot') {
+    // Synchronize Authoritative Game State to Firestore ONLY if it was the local player's turn
+    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && currentWho === 'player') {
+      const isLocalHost = activeRoom.hostName === playerName;
+      const newSeq = (authoritativeSequenceRef.current || 0) + 1;
+      authoritativeSequenceRef.current = newSeq;
+
+      const hostScore = isLocalHost ? newWhiteTotal : newBlackTotal;
+      const guestScore = isLocalHost ? newBlackTotal : newWhiteTotal;
+
+      const nextTurnRole: 'host' | 'guest' = nextWho === 'player'
+        ? (isLocalHost ? 'host' : 'guest')
+        : (isLocalHost ? 'guest' : 'host');
+
+      const gameStatus = (newWhiteTotal >= 9 || newBlackTotal >= 9) ? 'finished' : 'playing';
+      const now = Date.now();
+
+      const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
+        id: c.id,
+        type: c.type,
+        x: Math.round(c.x * 100) / 100,
+        y: Math.round(c.y * 100) / 100,
+        vx: Math.round(c.vx * 100) / 100,
+        vy: Math.round(c.vy * 100) / 100,
+        isPocketed: c.isPocketed,
+      }));
+
+      const newGameState: AuthoritativeGameState = {
+        version: 1,
+        sequenceNumber: newSeq,
+        gameStatus,
+        currentTurn: nextTurnRole,
+        turnStartedAt: now,
+        turnDeadline: now + 20000,
+        turnDuration: 20,
+        hostScore,
+        guestScore,
+        queenState: toAuthoritativeQueenState(queenState, isLocalHost),
+        coins: authCoins,
+        striker: {
+          x: strikerRef.current.x,
+          y: strikerRef.current.y,
+          vx: 0,
+          vy: 0,
+          isPocketed: false,
+        },
+        winnerRole: gameStatus === 'finished' ? (hostScore >= 9 ? 'host' : 'guest') : undefined,
+      };
+
+      updateRoomGameState(activeRoom.gameId, newGameState, nextTurnRole, gameStatus === 'playing' ? 'active' : gameStatus);
+    }
+
+    // Bot Shot Execution (Only when playing against Computer AI)
+    if (nextWho === 'bot' && matchmakingMode === 'COMPUTER') {
       setTimeout(() => {
         executeBotTurn();
       }, 700);
     }
-  }, [playerWhitePocketed, botBlackPocketed, queenState, activeRoom, playerName, opponentName, returnCoinToCenter, spawnFloatingScore]);
+  }, [playerWhitePocketed, botBlackPocketed, queenState, activeRoom, playerName, opponentName, matchmakingMode, returnCoinToCenter, spawnFloatingScore]);
 
   /* ==========================================================================
      BOT LOGIC (FAIR PLAY: ZERO AIM ASSIST / NO GHOST-BALL GEOMETRIC SOLVER)
@@ -1960,63 +2180,120 @@ export default function App() {
 
     const interval = setInterval(() => {
       const now = Date.now();
-      const elapsedIdle = Math.floor((now - lastActivityTimeRef.current) / 1000);
-      setIdleSeconds(elapsedIdle);
 
-      // Countdown only starts if no movement/response is made for 5 seconds
-      if (elapsedIdle >= 5) {
-        const remaining = Math.max(0, 20 - elapsedIdle);
+      if (matchmakingMode === 'PRIVATE_ROOM') {
+        const deadline = authoritativeDeadlineRef.current || (now + 20000);
+        const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
         setTurnTimeLeft(remaining);
 
-        // Play ticking sound on last 5 seconds (5, 4, 3, 2, 1)
         if (remaining <= 5 && remaining > 0) {
           soundEngine.playTick(remaining <= 2);
         }
 
-        if (remaining <= 0) {
+        if (remaining <= 0 && currentTurnRef.current === 'player') {
           soundEngine.playFoul();
-          const nextTurn = currentTurnRef.current === 'player' ? 'bot' : 'player';
-          spawnFloatingScore(
-            400,
-            currentTurnRef.current === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
-            "TIME'S UP! TURN PASSED",
-            '#EF4444'
-          );
+          const isLocalHost = activeRoom.hostName === playerName;
+          const nextTurnRole: 'host' | 'guest' = isLocalHost ? 'guest' : 'host';
+          setCurrentTurn('bot');
+          currentTurnRef.current = 'bot';
 
-          setCurrentTurn(nextTurn);
-          currentTurnRef.current = nextTurn;
+          const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
+            id: c.id,
+            type: c.type,
+            x: Math.round(c.x * 100) / 100,
+            y: Math.round(c.y * 100) / 100,
+            vx: Math.round(c.vx * 100) / 100,
+            vy: Math.round(c.vy * 100) / 100,
+            isPocketed: c.isPocketed,
+          }));
 
-          // Reset striker for next player
-          const nextBaseY = nextTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
-          strikerRef.current = {
-            ...strikerRef.current,
-            x: 400,
-            y: nextBaseY,
-            vx: 0,
-            vy: 0,
-            isSinking: false,
-            sinkScale: 1,
-            isPocketed: false,
+          const newSeq = (authoritativeSequenceRef.current || 0) + 1;
+          authoritativeSequenceRef.current = newSeq;
+          const newDeadline = Date.now() + 20000;
+          authoritativeDeadlineRef.current = newDeadline;
+
+          const newGameState: AuthoritativeGameState = {
+            version: 1,
+            sequenceNumber: newSeq,
+            gameStatus: 'playing',
+            currentTurn: nextTurnRole,
+            turnStartedAt: Date.now(),
+            turnDeadline: newDeadline,
+            turnDuration: 20,
+            hostScore: isLocalHost ? playerWhitePocketed : botBlackPocketed,
+            guestScore: isLocalHost ? botBlackPocketed : playerWhitePocketed,
+            queenState: toAuthoritativeQueenState(queenState, isLocalHost),
+            coins: authCoins,
+            striker: {
+              x: 400,
+              y: nextTurnRole === 'host' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
+              vx: 0,
+              vy: 0,
+              isPocketed: false,
+            },
           };
-          setStrikerX(400);
 
-          lastActivityTimeRef.current = Date.now();
-          setIdleSeconds(0);
-          setTurnTimeLeft(20);
-
-          if (nextTurn === 'bot') {
-            setTimeout(() => {
-              executeBotTurn();
-            }, 700);
+          if (activeRoom.gameId) {
+            updateRoomGameState(activeRoom.gameId, newGameState, nextTurnRole);
           }
         }
       } else {
-        setTurnTimeLeft(20);
+        // COMPUTER AI MODE
+        const elapsedIdle = Math.floor((now - lastActivityTimeRef.current) / 1000);
+        setIdleSeconds(elapsedIdle);
+
+        if (elapsedIdle >= 5) {
+          const remaining = Math.max(0, 20 - elapsedIdle);
+          setTurnTimeLeft(remaining);
+
+          if (remaining <= 5 && remaining > 0) {
+            soundEngine.playTick(remaining <= 2);
+          }
+
+          if (remaining <= 0) {
+            soundEngine.playFoul();
+            const nextTurn = currentTurnRef.current === 'player' ? 'bot' : 'player';
+            spawnFloatingScore(
+              400,
+              currentTurnRef.current === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
+              "TIME'S UP! TURN PASSED",
+              '#EF4444'
+            );
+
+            setCurrentTurn(nextTurn);
+            currentTurnRef.current = nextTurn;
+
+            const nextBaseY = nextTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
+            strikerRef.current = {
+              ...strikerRef.current,
+              x: 400,
+              y: nextBaseY,
+              vx: 0,
+              vy: 0,
+              isSinking: false,
+              sinkScale: 1,
+              isPocketed: false,
+            };
+            setStrikerX(400);
+
+            lastActivityTimeRef.current = Date.now();
+            setIdleSeconds(0);
+            setTurnTimeLeft(20);
+
+            if (nextTurn === 'bot') {
+              setTimeout(() => {
+                executeBotTurn();
+              }, 700);
+            }
+          }
+        } else {
+          setTurnTimeLeft(20);
+        }
       }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [screen, isStrikerMoving, gameOverResult, executeBotTurn, spawnFloatingScore]);
+  }, [screen, isStrikerMoving, gameOverResult, matchmakingMode, executeBotTurn, spawnFloatingScore, activeRoom, playerName, playerWhitePocketed, botBlackPocketed, queenState]);
 
   /* ==========================================================================
      MATCH CONCLUDED SOUND EFFECTS (FIRECRACKERS FOR WINNER, SOMBRE FOR LOSER)
@@ -2082,7 +2359,7 @@ export default function App() {
 
   const handlePointerDownOnCanvas = (e: React.PointerEvent<HTMLCanvasElement>) => {
     notifyActivity();
-    if (currentTurn !== 'player' || isStrikerMoving) return;
+    if (currentTurn !== 'player' || isStrikerMoving || isStrikerAnimating) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -2154,16 +2431,62 @@ export default function App() {
 
         // Broadcast shot to Firestore for real-time 2-player multiplayer
         if (activeRoom.gameId && screen === 'gameplay') {
-          updateRoomGameState(activeRoom.gameId, {
-            shot: {
+          const isLocalHost = activeRoom.hostName === playerName;
+          const shooterRole: 'host' | 'guest' = isLocalHost ? 'host' : 'guest';
+          const newShotSeq = (lastShotSequenceRef.current || 0) + 1;
+          lastShotSequenceRef.current = newShotSeq;
+
+          const lastShotObj: AuthoritativeShot = {
+            shooterName: playerName,
+            shooterRole,
+            strikerX: s.x,
+            vx: strikerRef.current.vx,
+            vy: strikerRef.current.vy,
+            power,
+            timestamp: Date.now(),
+            sequenceNumber: newShotSeq,
+          };
+
+          const currentSeq = (authoritativeSequenceRef.current || 0) + 1;
+          authoritativeSequenceRef.current = currentSeq;
+
+          const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
+            id: c.id,
+            type: c.type,
+            x: Math.round(c.x * 100) / 100,
+            y: Math.round(c.y * 100) / 100,
+            vx: Math.round(c.vx * 100) / 100,
+            vy: Math.round(c.vy * 100) / 100,
+            isPocketed: c.isPocketed,
+          }));
+
+          const hostScore = isLocalHost ? playerWhitePocketed : botBlackPocketed;
+          const guestScore = isLocalHost ? botBlackPocketed : playerWhitePocketed;
+
+          const now = Date.now();
+          const gameStateWithShot: AuthoritativeGameState = {
+            version: 1,
+            sequenceNumber: currentSeq,
+            gameStatus: 'playing',
+            currentTurn: shooterRole,
+            turnStartedAt: now,
+            turnDeadline: now + 20000,
+            turnDuration: 20,
+            hostScore,
+            guestScore,
+            queenState: toAuthoritativeQueenState(queenState, isLocalHost),
+            coins: authCoins,
+            striker: {
+              x: s.x,
+              y: s.y,
               vx: strikerRef.current.vx,
               vy: strikerRef.current.vy,
-              power,
-              strikerX: s.x,
-              shooter: playerName,
-              timestamp: Date.now(),
+              isPocketed: false,
             },
-          });
+            lastShot: lastShotObj,
+          };
+
+          updateRoomGameState(activeRoom.gameId, gameStateWithShot);
         }
       }
 
@@ -2191,7 +2514,7 @@ export default function App() {
   // Baseline positioning slider
   const handleBaselineSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     notifyActivity();
-    if (currentTurn !== 'player' || isStrikerMoving) return;
+    if (currentTurn !== 'player' || isStrikerMoving || isStrikerAnimating) return;
     const newX = parseFloat(e.target.value);
     setStrikerX(newX);
     strikerRef.current.x = newX;
@@ -2216,6 +2539,27 @@ export default function App() {
       const subDt = 1.0 / SUB_STEPS;
       for (let s = 0; s < SUB_STEPS; s++) {
         runPhysicsStep(subDt);
+      }
+
+      // Update smooth striker return animation if active
+      const anim = strikerReturnAnimRef.current;
+      if (anim.active) {
+        const elapsed = performance.now() - anim.startTime;
+        const progress = Math.min(1, elapsed / anim.duration);
+        const easeProgress = progress < 0.5
+          ? 4 * progress * progress * progress
+          : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+
+        const s = strikerRef.current;
+        s.x = anim.startX + (anim.targetX - anim.startX) * easeProgress;
+        s.y = anim.startY + (anim.targetY - anim.startY) * easeProgress;
+
+        if (progress >= 1) {
+          s.x = anim.targetX;
+          s.y = anim.targetY;
+          anim.active = false;
+          setIsStrikerAnimating(false);
+        }
       }
 
       checkTurnSettlement();
@@ -3254,27 +3598,42 @@ export default function App() {
             className="w-full h-full cursor-crosshair touch-none select-none"
           />
 
-          {/* DIRECT ON-SCREEN COUNTDOWN OVERLAY (SHOWN ON SCREEN AFTER 5s IDLE) */}
-          {idleSeconds >= 5 && turnTimeLeft <= 15 && !isStrikerMoving && !isTurnInProgressRef.current && (
-            <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-20">
+          {/* DIRECT ON-SCREEN COUNTDOWN OVERLAY - VISIBLE DURING ACTIVE TURN */}
+          {!isStrikerMoving && !isTurnInProgressRef.current && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none z-20">
               <div
-                className={`flex flex-col items-center justify-center rounded-3xl px-6 py-4 backdrop-blur-md border shadow-2xl transition-all duration-300 ${
+                className={`flex items-center gap-2 rounded-full px-4 py-1.5 backdrop-blur-md border shadow-2xl transition-all duration-300 ${
                   turnTimeLeft <= 5
-                    ? 'bg-red-950/90 border-red-500 text-red-100 ring-4 ring-red-500/50 scale-105 animate-pulse shadow-red-500/40'
-                    : 'bg-neutral-950/80 border-amber-400/80 text-amber-200 shadow-amber-500/20'
+                    ? 'bg-red-950/95 border-red-500 text-red-100 ring-2 ring-red-500/60 scale-105 animate-pulse shadow-red-500/40'
+                    : 'bg-neutral-950/85 border-amber-400/80 text-amber-300 shadow-amber-500/20'
                 }`}
               >
-                <span className="text-[11px] uppercase tracking-widest font-extrabold text-amber-300 mb-0.5">
-                  {currentTurn === 'player' ? 'Your Turn' : `${opponentName}'s Turn`}
+                <div className={`w-2.5 h-2.5 rounded-full ${turnTimeLeft <= 5 ? 'bg-red-500 animate-ping' : 'bg-amber-400'}`} />
+                <span className="text-xs font-extrabold uppercase tracking-wider">
+                  {currentTurn === 'player' ? 'Your Turn' : `${opponentName}`}
+                </span>
+                <span className="font-display font-black text-xl tracking-tight tabular-nums border-l border-neutral-700 pl-2.5">
+                  {turnTimeLeft}s
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* WARNING COUNTDOWN CENTER BANNER ON LAST 5 SECONDS */}
+          {!isStrikerMoving && !isTurnInProgressRef.current && turnTimeLeft <= 5 && (
+            <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-20">
+              <div className="flex flex-col items-center justify-center rounded-3xl px-6 py-4 bg-red-950/90 border-2 border-red-500 text-red-100 ring-4 ring-red-500/50 scale-105 animate-pulse shadow-2xl shadow-red-500/50 backdrop-blur-md">
+                <span className="text-xs uppercase tracking-widest font-black text-red-300 mb-0.5">
+                  ⚠️ TIME RUNNING OUT!
                 </span>
                 <div className="flex items-baseline gap-1 my-0.5">
-                  <span className="font-display font-black text-6xl tracking-tight tabular-nums drop-shadow-xl">
+                  <span className="font-display font-black text-6xl tracking-tight tabular-nums drop-shadow-xl text-red-100">
                     {turnTimeLeft}
                   </span>
-                  <span className="text-xl font-bold text-neutral-300">s</span>
+                  <span className="text-xl font-bold text-red-300">s</span>
                 </div>
-                <span className="text-[10px] text-neutral-300 font-semibold mt-1">
-                  {turnTimeLeft <= 5 ? '⚠️ Striking timer running out!' : 'Slide or touch board to reset'}
+                <span className="text-[10px] text-red-200 font-semibold mt-1">
+                  Take your shot quickly!
                 </span>
               </div>
             </div>
@@ -3491,24 +3850,30 @@ export default function App() {
               </div>
             </div>
 
-            {/* Start Match CTA */}
-            <div className="space-y-2">
-              <button
-                onClick={() => {
-                  setOpponentName('Computer');
-                  startMatchWithBet({ ...activeRoom, opponentName: 'Computer' });
-                }}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-neutral-950 font-black text-sm shadow-lg shadow-emerald-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
-              >
-                <Play className="w-4 h-4 fill-current" />
-                Play With Computer
-              </button>
-              <button
-                onClick={() => setScreen('create_game')}
-                className="text-xs text-neutral-400 hover:text-white"
-              >
-                Change Bet / Cancel
-              </button>
+            {/* Matchmaking Status CTA */}
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center justify-center gap-2 text-amber-400 font-semibold text-xs animate-pulse bg-amber-400/10 border border-amber-400/20 py-2.5 rounded-xl">
+                <Sparkles className="w-4 h-4 animate-spin" />
+                <span>Waiting for Player 2 to join...</span>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setScreen('create_game')}
+                  className="flex-1 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs border border-neutral-700 transition-all active:scale-95"
+                >
+                  Cancel / Back
+                </button>
+                <button
+                  onClick={() => {
+                    setMatchmakingMode('COMPUTER');
+                    setOpponentName('Computer');
+                    startMatchWithBet({ ...activeRoom, opponentName: 'Computer' });
+                  }}
+                  className="flex-1 py-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-amber-400/90 font-bold text-xs border border-amber-400/30 transition-all active:scale-95"
+                >
+                  Play vs Computer
+                </button>
+              </div>
             </div>
           </div>
         </div>

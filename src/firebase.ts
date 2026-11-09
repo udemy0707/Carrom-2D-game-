@@ -81,10 +81,10 @@ export interface AppUser {
 
 export function getDeviceUid(): string {
   if (typeof window === 'undefined') return 'server_session';
-  let uid = localStorage.getItem('carrom_device_uid');
+  let uid = sessionStorage.getItem('carrom_session_uid');
   if (!uid) {
-    uid = 'player_' + Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
-    localStorage.setItem('carrom_device_uid', uid);
+    uid = 'player_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now().toString(36);
+    sessionStorage.setItem('carrom_session_uid', uid);
   }
   return uid;
 }
