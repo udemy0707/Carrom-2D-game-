@@ -113,6 +113,26 @@ export interface AuthoritativeShot {
   sequenceNumber: number;
 }
 
+export interface AuthoritativeLiveAiming {
+  shooterRole: 'host' | 'guest';
+  strikerX: number;
+  isDragging: boolean;
+  power: number;
+  dirX: number;
+  dirY: number;
+  pullX: number;
+  pullY: number;
+  pullDist: number;
+  timestamp: number;
+}
+
+export interface AuthoritativeLivePhysics {
+  shooterRole: 'host' | 'guest';
+  striker: { x: number; y: number; vx: number; vy: number };
+  coins: { id: number; x: number; y: number; vx: number; vy: number; isPocketed: boolean }[];
+  timestamp: number;
+}
+
 export interface AuthoritativeGameState {
   version: number;
   sequenceNumber: number;
@@ -127,6 +147,8 @@ export interface AuthoritativeGameState {
   coins: AuthoritativeCoin[];
   striker: AuthoritativeStriker;
   lastShot?: AuthoritativeShot;
+  liveAiming?: AuthoritativeLiveAiming;
+  livePhysics?: AuthoritativeLivePhysics;
   winnerRole?: 'host' | 'guest';
   winnerName?: string;
   prizeWon?: number;
@@ -957,22 +979,7 @@ export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom)
     callback(initialLocal);
   }
 
-  // Active 1-second Polling Interval for cross-device resilience
-  const pollInterval = setInterval(async () => {
-    try {
-      const snap = await getDoc(doc(db, 'game_rooms', roomId));
-      if (snap.exists()) {
-        const roomData = snap.data() as ServerGameRoom;
-        saveLocalRoom(roomData);
-        callback(roomData);
-      }
-    } catch (err: any) {
-      if (isQuotaError(err)) {
-        notifyQuotaExceeded();
-      }
-    }
-  }, 1000);
-
+  // Fast Real-time Firestore Snapshot Listener (Sub-100ms Push Sync)
   const unsubFirestore = onSnapshot(
     doc(db, 'game_rooms', roomId),
     (snap) => {
@@ -992,7 +999,6 @@ export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom)
   );
 
   return () => {
-    clearInterval(pollInterval);
     if (channel) {
       channel.removeEventListener('message', handleMessage);
       channel.close();
@@ -1034,6 +1040,43 @@ export async function updateRoomGameState(
     } else {
       console.warn('Failed to update room state in Firestore:', err);
     }
+  }
+}
+
+let lastFirestoreStreamTime = 0;
+
+export function broadcastLiveStreamState(roomId: string, patchState: Partial<AuthoritativeGameState>): void {
+  const currentLocal = getLocalRoom(roomId);
+  if (!currentLocal) return;
+
+  let existingGameState: AuthoritativeGameState;
+  try {
+    existingGameState = typeof currentLocal.gameState === 'string'
+      ? JSON.parse(currentLocal.gameState)
+      : (currentLocal.gameState || {});
+  } catch {
+    existingGameState = {} as any;
+  }
+
+  const updatedGameState = { ...existingGameState, ...patchState };
+  const updatedPayload: Partial<ServerGameRoom> = {
+    ...currentLocal,
+    gameState: JSON.stringify(updatedGameState),
+    updatedAt: new Date().toISOString(),
+  };
+
+  saveLocalRoom(updatedPayload as ServerGameRoom);
+
+  const now = Date.now();
+  if (now - lastFirestoreStreamTime > 100) {
+    lastFirestoreStreamTime = now;
+    try {
+      const docRef = doc(db, 'game_rooms', roomId);
+      updateDoc(docRef, {
+        gameState: JSON.stringify(updatedGameState),
+        updatedAt: new Date().toISOString(),
+      }).catch(() => {});
+    } catch {}
   }
 }
 

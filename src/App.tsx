@@ -60,6 +60,7 @@ import {
   respondMultiplayerRematch,
   subscribeToRoom,
   updateRoomGameState,
+  broadcastLiveStreamState,
   ServerGameRoom,
   AuthoritativeGameState,
   AuthoritativeCoin,
@@ -399,8 +400,8 @@ const BOT_BASELINE_Y = 152;
 
 // Maximum pull-back drag distance for full power
 const MAX_DRAG_DIST = 175;
-// Maximum realistic speed (tuned so full drag breaks the pack with authority)
-const MAX_STRIKE_VELOCITY = 26.0;
+// Maximum realistic speed (tuned for realistic carrom sliding)
+const MAX_STRIKE_VELOCITY = 18.5;
 
 // 6 Betting Options: 50, 100, 200, 500, 1000, 2000
 const BETTING_AMOUNTS = [50, 100, 200, 500, 1000, 2000];
@@ -851,8 +852,8 @@ export default function App() {
     status: 'playing',
   });
 
-  // Matchmaking mode: PRIVATE_ROOM vs COMPUTER AI
-  const [matchmakingMode, setMatchmakingMode] = useState<'PRIVATE_ROOM' | 'COMPUTER'>('COMPUTER');
+  // Matchmaking mode: PRIVATE_ROOM Real-Time Multiplayer Only
+  const [matchmakingMode, setMatchmakingMode] = useState<'PRIVATE_ROOM'>('PRIVATE_ROOM');
 
   // Create Game Selection State (Betting Options: 50, 100, 200, 500, 1000, 2000)
   const [selectedBet, setSelectedBet] = useState<number>(500);
@@ -970,6 +971,29 @@ export default function App() {
     pullX: 0,
     pullY: 0,
   });
+
+  // Opponent Live Motion & Drag Aiming State (Request 1 & 4)
+  const [opponentStrikerX, setOpponentStrikerX] = useState<number>(400);
+  const [opponentDragForce, setOpponentDragForce] = useState<{
+    active: boolean;
+    power: number;
+    dirX: number;
+    dirY: number;
+    pullX: number;
+    pullY: number;
+    pullDist: number;
+  }>({
+    active: false,
+    power: 0,
+    dirX: 0,
+    dirY: 1,
+    pullX: 0,
+    pullY: 0,
+    pullDist: 0,
+  });
+
+  const isBotThinkingRef = useRef<boolean>(false);
+  const lastLiveBroadcastTimeRef = useRef<number>(0);
 
   // Game over state (Rule 7)
   const [gameOverResult, setGameOverResult] = useState<{
@@ -1385,14 +1409,6 @@ export default function App() {
      STARTING MATCH WITH WALLET DEDUCTION & COMMISSION RAKE
      ========================================================================== */
   const startMatchWithBet = (room: GameRoom) => {
-    // Guard: Prevent AI game initialization when matchmakingMode is PRIVATE_ROOM
-    if (room.opponentName === 'Computer' || room.opponentName === 'Bot') {
-      if (matchmakingMode !== 'COMPUTER') {
-        console.warn(`[MATCH_INIT_GUARD] AI match blocked! opponentName="${room.opponentName}" but matchmakingMode="${matchmakingMode}". Remaining in PRIVATE_ROOM waiting mode.`);
-        return;
-      }
-    }
-
     if (room.betAmount > 0) {
       if (wallet.realBalance < room.betAmount) {
         setInsufficientBalanceNotice({
@@ -1648,7 +1664,7 @@ export default function App() {
 
   // Authoritative Real-Time Multiplayer State & Opponent Shot Listener during gameplay
   useEffect(() => {
-    if ((screen !== 'gameplay' && screen !== 'room_waiting') || !activeRoom.gameId) return;
+    if ((screen !== 'gameplay' && screen !== 'room_waiting') || !activeRoom.gameId || matchmakingMode !== 'PRIVATE_ROOM') return;
 
     const unsub = subscribeToRoom(activeRoom.gameId, (serverRoom) => {
       // Point 4: Room Cancellation / Abandonment Listener
@@ -1736,17 +1752,7 @@ export default function App() {
           }
         }
 
-        // 3. Sync scores & queen state (Host score = White count, Guest score = Black count)
-        if (typeof parsed.hostScore === 'number' && typeof parsed.guestScore === 'number') {
-          setPlayerWhitePocketed(parsed.hostScore);
-          setBotBlackPocketed(parsed.guestScore);
-        }
-
-        if (parsed.queenState) {
-          setQueenState(fromAuthoritativeQueenState(parsed.queenState, isHost));
-        }
-
-        // 4. Sync coin positions if not currently running local physics turn simulation
+        // 3. Sync coin positions & derive exact ground truth pocketed counts
         if (Array.isArray(parsed.coins) && parsed.coins.length > 0) {
           if (!isTurnInProgressRef.current) {
             const currentCoins = coinsRef.current;
@@ -1761,10 +1767,128 @@ export default function App() {
                 if (authCoin.isPocketed) match.isSinking = false;
               }
             });
+            // Re-derive exact score directly from actual pocketed coins on board
+            const syncWhite = currentCoins.filter((c) => c.type === 'white' && c.isPocketed).length;
+            const syncBlack = currentCoins.filter((c) => c.type === 'black' && c.isPocketed).length;
+            setPlayerWhitePocketed(syncWhite);
+            setBotBlackPocketed(syncBlack);
+          }
+        } else if (typeof parsed.hostScore === 'number' && typeof parsed.guestScore === 'number') {
+          setPlayerWhitePocketed(parsed.hostScore);
+          setBotBlackPocketed(parsed.guestScore);
+        }
+
+        if (parsed.queenState) {
+          setQueenState(fromAuthoritativeQueenState(parsed.queenState, isHost));
+        }
+
+        // 4. Game Over Sync Listener
+        const syncWhiteScore = typeof parsed.hostScore === 'number' ? parsed.hostScore : coinsRef.current.filter((c) => c.type === 'white' && c.isPocketed).length;
+        const syncBlackScore = typeof parsed.guestScore === 'number' ? parsed.guestScore : coinsRef.current.filter((c) => c.type === 'black' && c.isPocketed).length;
+
+        if (parsed.gameStatus === 'finished' || syncWhiteScore >= 9 || syncBlackScore >= 9) {
+          const whiteWon = syncWhiteScore >= 9;
+          const blackWon = syncBlackScore >= 9;
+          const localPlayerWon = isHost ? whiteWon : blackWon;
+
+          if (!gameOverResult) {
+            const winnerRole: 'player' | 'bot' = localPlayerWon ? 'player' : 'bot';
+            const prizeWon = localPlayerWon ? activeRoom.winnerPrize : 0;
+            const rakeDeducted = localPlayerWon ? activeRoom.platformRake : 0;
+
+            if (localPlayerWon) {
+              soundEngine.playVictory();
+              if (prizeWon > 0) {
+                setWallet((prev) => {
+                  const updated: WalletState = {
+                    ...prev,
+                    realBalance: prev.realBalance + prizeWon,
+                    totalWon: prev.totalWon + prizeWon,
+                    matchesWon: prev.matchesWon + 1,
+                    transactions: [
+                      {
+                        id: `TXN-WIN-${Date.now().toString().slice(-6)}`,
+                        type: 'win',
+                        amount: prizeWon,
+                        description: `Victory in Room ${activeRoom.gameId} (10% Rake Deducted)`,
+                        timestamp: Date.now(),
+                        status: 'success',
+                      },
+                      ...prev.transactions,
+                    ],
+                  };
+                  savePlayerWallet(updated, playerName);
+                  return updated;
+                });
+              }
+            } else {
+              soundEngine.playDefeat();
+            }
+
+            setGameOverResult({
+              winner: winnerRole,
+              winnerName: localPlayerWon ? playerName : opponentName,
+              loserName: localPlayerWon ? opponentName : playerName,
+              prizeWon,
+              rakeDeducted,
+              whiteScore: syncWhiteScore,
+              blackScore: syncBlackScore,
+            });
           }
         }
 
-        // 5. Process opponent shot (STRICT STALE SHOT & REPLAY PREVENTION)
+        // 5. Sync live opponent slider movement & drag aiming in real-time (Request 1 & 4)
+        if (parsed.liveAiming && parsed.liveAiming.shooterRole !== localRoleRef.current) {
+          const live = parsed.liveAiming;
+          setOpponentStrikerX(live.strikerX);
+          if (live.isDragging) {
+            setOpponentDragForce({
+              active: true,
+              power: live.power,
+              dirX: live.dirX,
+              dirY: -live.dirY,
+              pullX: live.pullX,
+              pullY: -live.pullY,
+              pullDist: live.pullDist,
+            });
+          } else {
+            setOpponentDragForce({
+              active: false,
+              power: 0,
+              dirX: 0,
+              dirY: 1,
+              pullX: 0,
+              pullY: 0,
+              pullDist: 0,
+            });
+          }
+        }
+
+        // 6. Sync live physics simulation motion from active shooter in real-time (Request 1)
+        if (parsed.livePhysics && parsed.livePhysics.shooterRole !== localRoleRef.current) {
+          const phys = parsed.livePhysics;
+          if (phys.striker) {
+            strikerRef.current.x = phys.striker.x;
+            strikerRef.current.y = phys.shooterRole === 'guest' ? BOT_BASELINE_Y : PLAYER_BASELINE_Y;
+            strikerRef.current.vx = phys.striker.vx;
+            strikerRef.current.vy = phys.striker.vy;
+          }
+          if (Array.isArray(phys.coins)) {
+            const currentCoins = coinsRef.current;
+            phys.coins.forEach((c) => {
+              const match = currentCoins.find((m) => m.id === c.id);
+              if (match) {
+                match.x = c.x;
+                match.y = c.y;
+                match.vx = c.vx;
+                match.vy = c.vy;
+                match.isPocketed = c.isPocketed;
+              }
+            });
+          }
+        }
+
+        // 7. Process opponent shot (STRICT STALE SHOT & REPLAY PREVENTION)
         if (parsed.lastShot && parsed.lastShot.sequenceNumber > lastShotSequenceRef.current) {
           const shotSeq = parsed.lastShot.sequenceNumber;
           lastShotSequenceRef.current = shotSeq; // Consume sequence immediately
@@ -1796,15 +1920,44 @@ export default function App() {
      PHYSICS SIMULATION STEP (RULE 1: STRONGER FRAME LOGIC & RULE 2: FAIR POCKETS)
      ========================================================================== */
   const runPhysicsStep = useCallback((dt: number) => {
-    const RESTITUTION_COIN = 0.83;
-    const RESTITUTION_WALL = 0.76;
-    const STOP_VELOCITY = 0.22;
+    const RESTITUTION_COIN = 0.82;
+    const RESTITUTION_WALL = 0.78;
+    const STOP_VELOCITY = 0.16;
 
     const coins = coinsRef.current;
     const striker = strikerRef.current;
     const allDiscs = [striker, ...coins].filter((c) => !c.isPocketed);
 
-    // 1. Move & apply authentic fine-powder sliding friction & deceleration (Requirement 1)
+    // Broadcast live physics positions during shot motion (Request 1)
+    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && isTurnInProgressRef.current) {
+      const now = Date.now();
+      if (now - lastLiveBroadcastTimeRef.current > 60) {
+        lastLiveBroadcastTimeRef.current = now;
+        const liveCoins = coinsRef.current.map((c) => ({
+          id: c.id,
+          x: Math.round(c.x * 10) / 10,
+          y: Math.round(c.y * 10) / 10,
+          vx: Math.round(c.vx * 10) / 10,
+          vy: Math.round(c.vy * 10) / 10,
+          isPocketed: c.isPocketed,
+        }));
+        broadcastLiveStreamState(activeRoom.gameId, {
+          livePhysics: {
+            shooterRole: localRoleRef.current,
+            striker: {
+              x: Math.round(strikerRef.current.x * 10) / 10,
+              y: Math.round(strikerRef.current.y * 10) / 10,
+              vx: Math.round(strikerRef.current.vx * 10) / 10,
+              vy: Math.round(strikerRef.current.vy * 10) / 10,
+            },
+            coins: liveCoins,
+            timestamp: now,
+          },
+        });
+      }
+    }
+
+    // 1. Move & apply authentic fine-powder sliding friction & deceleration (Requirement 1 & Request 2)
     for (const d of allDiscs) {
       if (d.isSinking) {
         d.sinkScale = Math.max(0, d.sinkScale - 0.075);
@@ -1856,11 +2009,11 @@ export default function App() {
         d.spinVel *= 0.982;
       }
 
-      // Realistic sliding friction (slightly increased deceleration as requested)
+      // Natural, smooth board sliding & realistic deceleration
       const currentSpeed = Math.hypot(d.vx, d.vy);
       if (currentSpeed > 0) {
-        const kineticDecel = 0.052 * dt;
-        const airResistance = 1.0 - 0.0035 * dt;
+        const kineticDecel = 0.068 * dt;
+        const airResistance = 1.0 - 0.0042 * dt;
 
         const newSpeed = Math.max(0, (currentSpeed - kineticDecel) * airResistance);
         if (newSpeed < STOP_VELOCITY) {
@@ -1874,12 +2027,11 @@ export default function App() {
         }
       }
 
-      // RULE 2: FAIR REALISTIC NET HOLE POCKET DETECTION (Requirement 1)
-      // Only considered pocket if the coin center genuinely drops inside the round net hole opening
+      // STRICT NATURAL CARROM NET HOLE POCKET DETECTION (Requirement 1)
+      // A coin is captured strictly when the edge of the nethole has crossed >50% of the coin's total size (dist < POCKET_HOLE_RADIUS)
       for (const pocket of POCKETS) {
         const dist = Math.hypot(d.x - pocket.x, d.y - pocket.y);
-        const captureRadius = currentSpeed < 6.5 ? POCKET_HOLE_RADIUS * 0.58 : POCKET_HOLE_RADIUS * 0.46;
-        if (dist < captureRadius && !d.isSinking) {
+        if (dist < POCKET_HOLE_RADIUS && !d.isSinking) {
           d.isSinking = true;
           d.vx = (pocket.x - d.x) * 0.18;
           d.vy = (pocket.y - d.y) * 0.18;
@@ -2150,11 +2302,15 @@ export default function App() {
     // RULE 7: ALL 9 COINS POCKETED GAME OVER & DECLARATION
     // -------------------------------------------------------------
     if (newWhiteTotal >= 9 || newBlackTotal >= 9) {
-      const winner = newWhiteTotal >= 9 ? 'player' : 'bot';
-      const prizeWon = winner === 'player' ? activeRoom.winnerPrize : 0;
-      const rakeDeducted = winner === 'player' ? activeRoom.platformRake : 0;
+      const isHost = localRoleRef.current === 'host';
+      const whiteWon = newWhiteTotal >= 9;
+      const blackWon = newBlackTotal >= 9;
+      const localPlayerWon = isHost ? whiteWon : blackWon;
+      const winnerRole: 'player' | 'bot' = localPlayerWon ? 'player' : 'bot';
+      const prizeWon = localPlayerWon ? activeRoom.winnerPrize : 0;
+      const rakeDeducted = localPlayerWon ? activeRoom.platformRake : 0;
 
-      if (winner === 'player') {
+      if (localPlayerWon) {
         soundEngine.playVictory();
         if (prizeWon > 0) {
           setWallet((prev) => {
@@ -2179,12 +2335,14 @@ export default function App() {
             return updated;
           });
         }
+      } else {
+        soundEngine.playDefeat();
       }
 
       setGameOverResult({
-        winner,
-        winnerName: winner === 'player' ? playerName : opponentName,
-        loserName: winner === 'player' ? opponentName : playerName,
+        winner: winnerRole,
+        winnerName: localPlayerWon ? playerName : opponentName,
+        loserName: localPlayerWon ? opponentName : playerName,
         prizeWon,
         rakeDeducted,
         whiteScore: newWhiteTotal,
@@ -2216,6 +2374,7 @@ export default function App() {
     };
 
     if (nextWho === 'player') {
+      isBotThinkingRef.current = false;
       setStrikerX(400);
     }
 
@@ -2227,8 +2386,9 @@ export default function App() {
       const newSeq = (authoritativeSequenceRef.current || 0) + 1;
       authoritativeSequenceRef.current = newSeq;
 
-      const hostScore = isHost ? newWhiteTotal : newBlackTotal;
-      const guestScore = isHost ? newBlackTotal : newWhiteTotal;
+      // Host Score is ALWAYS total White coins pocketed, Guest Score is ALWAYS total Black coins pocketed
+      const hostScore = newWhiteTotal;
+      const guestScore = newBlackTotal;
 
       const nextTurnRole: 'host' | 'guest' = nextWho === 'player'
         ? localRoleRef.current
@@ -2272,74 +2432,10 @@ export default function App() {
       updateRoomGameState(activeRoom.gameId, newGameState, nextTurnRole, gameStatus === 'playing' ? 'active' : gameStatus);
     }
 
-    // Bot Shot Execution (Only when playing against Computer AI)
-    if (nextWho === 'bot' && matchmakingMode === 'COMPUTER') {
-      setTimeout(() => {
-        executeBotTurn();
-      }, 700);
-    }
-  }, [playerWhitePocketed, botBlackPocketed, queenState, activeRoom, playerName, opponentName, matchmakingMode, returnCoinToCenter, spawnFloatingScore]);
+  }, [playerWhitePocketed, botBlackPocketed, queenState, activeRoom, playerName, opponentName, returnCoinToCenter, spawnFloatingScore]);
 
   /* ==========================================================================
-     BOT LOGIC (FAIR PLAY: ZERO AIM ASSIST / NO GHOST-BALL GEOMETRIC SOLVER)
-     ========================================================================== */
-  const executeBotTurn = useCallback(() => {
-    const active = coinsRef.current.filter((c) => !c.isPocketed && !c.isSinking);
-    if (active.length === 0) return;
-
-    // Pick target coin (prioritize covering queen if pending)
-    let candidates: Coin[] = [];
-    if (queenState === 'pending_bot') {
-      candidates = active.filter((c) => c.type === 'black');
-    }
-    if (candidates.length === 0) {
-      candidates = active.filter((c) => c.type === 'black' || c.type === 'queen');
-    }
-    if (candidates.length === 0) {
-      candidates = active;
-    }
-
-    // Natural target selection (closest or random eligible coin)
-    const targetCoin = candidates[Math.floor(Math.random() * candidates.length)];
-
-    // Natural human-like baseline placement (not reverse-engineered by computer)
-    const baselineVariation = (Math.random() - 0.5) * 90;
-    const botStrikerX = Math.max(
-      BASELINE_MIN_X,
-      Math.min(BASELINE_MAX_X, targetCoin.x + baselineVariation)
-    );
-
-    // Place striker on the bot's baseline
-    strikerRef.current.x = botStrikerX;
-    strikerRef.current.y = BOT_BASELINE_Y;
-    setStrikerX(botStrikerX);
-
-    // Aim directly towards the coin — NO ghost pocket angle calculation or aim assist
-    const rawDx = targetCoin.x - botStrikerX;
-    const rawDy = targetCoin.y - BOT_BASELINE_Y;
-    const directAngle = Math.atan2(rawDy, rawDx);
-
-    // Natural human spread/imprecision (variance of ±0.14 rad, like real human hand aim)
-    const humanVariance = (Math.random() - 0.5) * 0.28;
-    const finalShotAngle = directAngle + humanVariance;
-
-    // Natural striking force (12 to 19, realistic strike speed)
-    const naturalPower = 12.5 + Math.random() * 6.5;
-
-    setTimeout(() => {
-      botAimLineRef.current = null;
-      isTurnInProgressRef.current = true;
-      setIsStrikerMoving(true);
-
-      strikerRef.current.vx = Math.cos(finalShotAngle) * naturalPower;
-      strikerRef.current.vy = Math.sin(finalShotAngle) * naturalPower;
-
-      soundEngine.playStrikerHit(naturalPower / MAX_STRIKE_VELOCITY);
-    }, 650);
-  }, [queenState]);
-
-  /* ==========================================================================
-     STRICT 20-SECOND TURN TIMER & TICKING AUDIO LIFECYCLE (ISSUE 1 FIX)
+     STRICT 20-SECOND TURN TIMER & TICKING AUDIO LIFECYCLE
      ========================================================================== */
   const lastTickedSecondRef = useRef<number>(-1);
 
@@ -2354,123 +2450,67 @@ export default function App() {
       const isMyTurnActive = currentTurnRef.current === 'player';
       const isStrikerStill = !isStrikerMoving && !isTurnInProgressRef.current;
 
-      if (matchmakingMode === 'PRIVATE_ROOM') {
-        const deadline = authoritativeDeadlineRef.current || (now + 20000);
-        const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
-        setTurnTimeLeft(remaining);
+      const deadline = authoritativeDeadlineRef.current || (now + 20000);
+      const remaining = Math.max(0, Math.ceil((deadline - now) / 1000));
+      setTurnTimeLeft(remaining);
 
-        // Strict Ticking Audio Lifecycle (Starts at 10s ONLY for active local player's turn, stops on turn change/expiration/shot)
-        if (isMyTurnActive && isStrikerStill && remaining <= 10 && remaining > 0) {
-          if (lastTickedSecondRef.current !== remaining) {
-            lastTickedSecondRef.current = remaining;
-            soundEngine.playTick(remaining <= 3);
-          }
-        } else {
-          lastTickedSecondRef.current = -1;
-        }
-
-        // Timeout turn transfer for Host
-        if (remaining <= 0 && currentTurnRef.current === 'player') {
-          soundEngine.playFoul();
-          lastTickedSecondRef.current = -1;
-          const isHost = localRoleRef.current === 'host';
-          const nextTurnRole: 'host' | 'guest' = isHost ? 'guest' : 'host';
-          setCurrentTurn('bot');
-          currentTurnRef.current = 'bot';
-
-          const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
-            id: c.id,
-            type: c.type,
-            x: Math.round(c.x * 100) / 100,
-            y: Math.round(c.y * 100) / 100,
-            vx: Math.round(c.vx * 100) / 100,
-            vy: Math.round(c.vy * 100) / 100,
-            isPocketed: c.isPocketed,
-          }));
-
-          const newSeq = (authoritativeSequenceRef.current || 0) + 1;
-          authoritativeSequenceRef.current = newSeq;
-          const newDeadline = Date.now() + 20000;
-          authoritativeDeadlineRef.current = newDeadline;
-
-          const newGameState: AuthoritativeGameState = {
-            version: 1,
-            sequenceNumber: newSeq,
-            gameStatus: 'playing',
-            currentTurn: nextTurnRole,
-            turnStartedAt: Date.now(),
-            turnDeadline: newDeadline,
-            turnDuration: 20,
-            hostScore: isHost ? playerWhitePocketed : botBlackPocketed,
-            guestScore: isHost ? botBlackPocketed : playerWhitePocketed,
-            queenState: toAuthoritativeQueenState(queenState, isHost),
-            coins: authCoins,
-            striker: {
-              x: 400,
-              y: nextTurnRole === 'host' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
-              vx: 0,
-              vy: 0,
-              isPocketed: false,
-            },
-          };
-
-          if (activeRoom.gameId) {
-            updateRoomGameState(activeRoom.gameId, newGameState, nextTurnRole);
-          }
+      // Strict Ticking Audio Lifecycle (Starts at 10s ONLY for active local player's turn, stops on turn change/expiration/shot)
+      if (isMyTurnActive && isStrikerStill && remaining <= 10 && remaining > 0) {
+        if (lastTickedSecondRef.current !== remaining) {
+          lastTickedSecondRef.current = remaining;
+          soundEngine.playTick(remaining <= 3);
         }
       } else {
-        // COMPUTER AI MODE
-        const elapsedIdle = Math.floor((now - lastActivityTimeRef.current) / 1000);
-        setIdleSeconds(elapsedIdle);
+        lastTickedSecondRef.current = -1;
+      }
 
-        const remaining = Math.max(0, 20 - elapsedIdle);
-        setTurnTimeLeft(remaining);
+      // Timeout turn transfer for Host
+      if (remaining <= 0 && currentTurnRef.current === 'player') {
+        soundEngine.playFoul();
+        lastTickedSecondRef.current = -1;
+        const isHost = localRoleRef.current === 'host';
+        const nextTurnRole: 'host' | 'guest' = isHost ? 'guest' : 'host';
+        setCurrentTurn('bot');
+        currentTurnRef.current = 'bot';
 
-        if (isMyTurnActive && isStrikerStill && remaining <= 10 && remaining > 0) {
-          if (lastTickedSecondRef.current !== remaining) {
-            lastTickedSecondRef.current = remaining;
-            soundEngine.playTick(remaining <= 3);
-          }
-        } else {
-          lastTickedSecondRef.current = -1;
-        }
+        const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
+          id: c.id,
+          type: c.type,
+          x: Math.round(c.x * 100) / 100,
+          y: Math.round(c.y * 100) / 100,
+          vx: Math.round(c.vx * 100) / 100,
+          vy: Math.round(c.vy * 100) / 100,
+          isPocketed: c.isPocketed,
+        }));
 
-        if (remaining <= 0) {
-          soundEngine.playFoul();
-          lastTickedSecondRef.current = -1;
-          const nextTurn = currentTurnRef.current === 'player' ? 'bot' : 'player';
-          spawnFloatingScore(
-            400,
-            currentTurnRef.current === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
-            "TIME'S UP! TURN PASSED",
-            '#EF4444'
-          );
+        const newSeq = (authoritativeSequenceRef.current || 0) + 1;
+        authoritativeSequenceRef.current = newSeq;
+        const newDeadline = Date.now() + 20000;
+        authoritativeDeadlineRef.current = newDeadline;
 
-          setCurrentTurn(nextTurn);
-          currentTurnRef.current = nextTurn;
-
-          const nextBaseY = nextTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
-          strikerRef.current = {
-            ...strikerRef.current,
+        const newGameState: AuthoritativeGameState = {
+          version: 1,
+          sequenceNumber: newSeq,
+          gameStatus: 'playing',
+          currentTurn: nextTurnRole,
+          turnStartedAt: Date.now(),
+          turnDeadline: newDeadline,
+          turnDuration: 20,
+          hostScore: coinsRef.current.filter((c) => c.type === 'white' && c.isPocketed).length,
+          guestScore: coinsRef.current.filter((c) => c.type === 'black' && c.isPocketed).length,
+          queenState: toAuthoritativeQueenState(queenState, isHost),
+          coins: authCoins,
+          striker: {
             x: 400,
-            y: nextBaseY,
+            y: nextTurnRole === 'host' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y,
             vx: 0,
             vy: 0,
-            isSinking: false,
-            sinkScale: 1,
             isPocketed: false,
-          };
-          setStrikerX(400);
+          },
+        };
 
-          lastActivityTimeRef.current = Date.now();
-          setIdleSeconds(0);
-          setTurnTimeLeft(20);
-
-          if (nextTurn === 'bot') {
-            setTimeout(() => {
-              executeBotTurn();
-            }, 700);
-          }
+        if (activeRoom.gameId) {
+          updateRoomGameState(activeRoom.gameId, newGameState, nextTurnRole);
         }
       }
     }, 1000);
@@ -2479,7 +2519,7 @@ export default function App() {
       clearInterval(interval);
       lastTickedSecondRef.current = -1;
     };
-  }, [screen, isStrikerMoving, gameOverResult, matchmakingMode, executeBotTurn, spawnFloatingScore, activeRoom, playerName, playerWhitePocketed, botBlackPocketed, queenState]);
+  }, [screen, isStrikerMoving, gameOverResult, spawnFloatingScore, activeRoom, playerName, playerWhitePocketed, botBlackPocketed, queenState]);
 
   /* ==========================================================================
      MATCH CONCLUDED SOUND EFFECTS (FIRECRACKERS FOR WINNER, SOMBRE FOR LOSER)
@@ -2531,6 +2571,23 @@ export default function App() {
         pullX,
         pullY,
       });
+
+      if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+        broadcastLiveStreamState(activeRoom.gameId, {
+          liveAiming: {
+            shooterRole: localRoleRef.current,
+            strikerX: s.x,
+            isDragging: true,
+            power,
+            dirX,
+            dirY,
+            pullX,
+            pullY,
+            pullDist: clampedPull,
+            timestamp: Date.now(),
+          },
+        });
+      }
     } else {
       setDragForce({
         pullDist: 0,
@@ -2540,8 +2597,25 @@ export default function App() {
         pullX: 0,
         pullY: 0,
       });
+
+      if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+        broadcastLiveStreamState(activeRoom.gameId, {
+          liveAiming: {
+            shooterRole: localRoleRef.current,
+            strikerX: s.x,
+            isDragging: false,
+            power: 0,
+            dirX: 0,
+            dirY: -1,
+            pullX: 0,
+            pullY: 0,
+            pullDist: 0,
+            timestamp: Date.now(),
+          },
+        });
+      }
     }
-  }, []);
+  }, [matchmakingMode, activeRoom.gameId, notifyActivity]);
 
   const handlePointerDownOnCanvas = (e: React.PointerEvent<HTMLCanvasElement>) => {
     notifyActivity();
@@ -2709,6 +2783,23 @@ export default function App() {
     setStrikerX(newX);
     strikerRef.current.x = newX;
     strikerRef.current.y = PLAYER_BASELINE_Y;
+
+    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+      broadcastLiveStreamState(activeRoom.gameId, {
+        liveAiming: {
+          shooterRole: localRoleRef.current,
+          strikerX: newX,
+          isDragging: false,
+          power: 0,
+          dirX: 0,
+          dirY: -1,
+          pullX: 0,
+          pullY: 0,
+          pullDist: 0,
+          timestamp: Date.now(),
+        },
+      });
+    }
   };
 
   /* ==========================================================================
@@ -3468,7 +3559,7 @@ export default function App() {
       }
 
       // -------------------------------------------------------------
-      // REQUIREMENT 1: DYNAMIC DRAG GAUGE & SHORTER WHITE DOTTED LINE
+      // REQUEST 1 & 2: AIM TRAJECTORY WITH EXACTLY 4 WHITE DOTS
       // -------------------------------------------------------------
       if (isDraggingStriker && dragForce.power > 0.02 && currentTurnRef.current === 'player') {
         ctx.save();
@@ -3498,6 +3589,7 @@ export default function App() {
         ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
         ctx.stroke();
 
+        // Backward pull indicator line
         const pullTargetX = striker.x + (dragForce.pullX || 0);
         const pullTargetY = striker.y + (dragForce.pullY || 0);
 
@@ -3510,6 +3602,7 @@ export default function App() {
         ctx.stroke();
         ctx.setLineDash([]);
 
+        // Power Arrow
         const arrowLength = 34 + dragForce.power * 68;
         const arrowStartX = striker.x + dragForce.dirX * (STRIKER_RADIUS + 2);
         const arrowStartY = striker.y + dragForce.dirY * (STRIKER_RADIUS + 2);
@@ -3545,8 +3638,26 @@ export default function App() {
         ctx.fillStyle = '#FFE600';
         ctx.fill();
 
+        // REQUEST 2: EXACTLY 4 WHITE DOTS IN AIM TRAJECTORY LINE
+        const dotStartDist = STRIKER_RADIUS + arrowLength + 14;
+        const dotSpacing = 22;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = 5;
+        ctx.fillStyle = '#FFFFFF';
+
+        for (let i = 0; i < 4; i++) {
+          const dist = dotStartDist + i * dotSpacing;
+          const dotX = striker.x + dragForce.dirX * dist;
+          const dotY = striker.y + dragForce.dirY * dist;
+          ctx.beginPath();
+          ctx.arc(dotX, dotY, 3.8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
         ctx.restore();
       }
+
+
 
 
       // Particles
@@ -4020,7 +4131,7 @@ export default function App() {
                 <Sparkles className="w-4 h-4 animate-spin" />
                 <span>Waiting for Player 2 to join...</span>
               </div>
-              <div className="flex gap-2">
+              <div>
                 <button
                   onClick={async () => {
                     if (activeRoom.gameId) {
@@ -4028,19 +4139,9 @@ export default function App() {
                     }
                     setScreen('create_game');
                   }}
-                  className="flex-1 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs border border-neutral-700 transition-all active:scale-95"
+                  className="w-full py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-bold text-xs border border-neutral-700 transition-all active:scale-95 shadow-md"
                 >
                   Cancel / Back
-                </button>
-                <button
-                  onClick={() => {
-                    setMatchmakingMode('COMPUTER');
-                    setOpponentName('Computer');
-                    startMatchWithBet({ ...activeRoom, opponentName: 'Computer' });
-                  }}
-                  className="flex-1 py-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-amber-400/90 font-bold text-xs border border-amber-400/30 transition-all active:scale-95"
-                >
-                  Play vs Computer
                 </button>
               </div>
             </div>
