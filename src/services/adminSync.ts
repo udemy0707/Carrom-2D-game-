@@ -218,8 +218,16 @@ export function createInitialAuthoritativeGameState(): AuthoritativeGameState {
   };
 }
 
+export interface RematchState {
+  requestedBy: string;
+  requestedByRole: 'host' | 'guest';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  updatedAt: number;
+}
+
 export interface ServerGameRoom {
   roomId: string;
+  roomCode: string;
   hostId: string;
   hostName: string;
   guestId?: string;
@@ -228,12 +236,16 @@ export interface ServerGameRoom {
   totalPot: number;
   winnerPrize: number;
   platformRake: number;
-  status: 'waiting' | 'active' | 'MATCHED' | 'finished';
+  status: 'WAITING' | 'READY' | 'STARTING' | 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED' | 'EXPIRED' | 'waiting' | 'active' | 'MATCHED' | 'finished' | 'ready' | 'matched' | 'playing' | string;
+  playerCount: number;
+  matchId?: string;
   turn: 'host' | 'guest';
   gameState?: string;
   winner?: string;
   createdAt: string;
   updatedAt: string;
+  expiresAt?: number;
+  rematchState?: RematchState;
 }
 
 // Storage Keys & Firestore Paths
@@ -626,39 +638,44 @@ function getLocalRoom(roomId: string): ServerGameRoom | null {
 
 export async function createMultiplayerRoom(playerName: string, entryFee: number): Promise<ServerGameRoom> {
   const user = await ensureFirebaseAuth();
-  const roomId = Math.floor(100000 + Math.random() * 900000).toString();
+  // Generate unique 6-digit public room code
+  const roomCode = Math.floor(100000 + Math.random() * 900000).toString();
+  const roomId = roomCode;
   const totalPot = entryFee * 2;
   const platformRake = Math.round(totalPot * 0.1);
   const winnerPrize = totalPot - platformRake;
 
-  console.log(`[ROOM] Creating room with ID ${roomId} for host "${playerName}" (UID: ${user.uid})...`);
+  console.log(`[ROOM_CREATE] Generating Room Code ${roomCode} for Host "${playerName}" (UID: ${user.uid})...`);
 
   const room: ServerGameRoom = {
     roomId,
+    roomCode,
     hostId: user.uid,
     hostName: playerName.trim() || 'Host Player',
     entryFee,
     totalPot,
     winnerPrize,
     platformRake,
-    status: 'waiting',
+    status: 'WAITING',
+    playerCount: 1,
     turn: 'host',
     gameState: JSON.stringify(createInitialAuthoritativeGameState()),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    expiresAt: Date.now() + 30 * 60 * 1000, // 30 minutes expiry
   };
 
   saveLocalRoom(room);
 
   try {
     await setDoc(doc(db, 'game_rooms', roomId), room);
-    console.log(`[ROOM] Room created successfully in Firestore: ${roomId}`);
+    console.log(`[ROOM_CREATE] Room ${roomCode} saved to Firestore successfully.`);
   } catch (err) {
     if (isQuotaError(err)) {
       notifyQuotaExceeded();
-      console.warn(`[ROOM] Firestore quota exceeded during creation. Operating in local mode for room ${roomId}`);
+      console.warn(`[ROOM_CREATE] Firestore quota exceeded. Running in hybrid local broadcast mode for ${roomCode}`);
     } else {
-      console.warn(`[ROOM] Firestore creation warning for room ${roomId}:`, err);
+      console.warn(`[ROOM_CREATE] Firestore write error for ${roomCode}:`, err);
     }
   }
 
@@ -666,18 +683,18 @@ export async function createMultiplayerRoom(playerName: string, entryFee: number
 }
 
 export async function joinMultiplayerRoom(
-  roomIdInput: string,
+  roomCodeInput: string,
   playerName: string
 ): Promise<{ success: boolean; room?: ServerGameRoom; error?: string }> {
-  let cleanCode = roomIdInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (!cleanCode) {
-    return { success: false, error: 'Please enter a valid Room Code.' };
+  const cleanCode = roomCodeInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!cleanCode || cleanCode.length < 5) {
+    return { success: false, error: 'Please enter a valid 6-digit Room Code.' };
   }
 
   const user = await ensureFirebaseAuth();
   const guestNameInput = playerName.trim() || 'Guest Player';
 
-  // 1. Try local storage / broadcast room first (instant fallback for local tabs/devices or quota limits)
+  // 1. Try local storage / broadcast channel room lookup
   let localRoom = getLocalRoom(cleanCode);
   if (!localRoom && cleanCode.startsWith('CR')) {
     const numericCode = cleanCode.replace(/^CR/, '');
@@ -685,6 +702,32 @@ export async function joinMultiplayerRoom(
   }
 
   if (localRoom) {
+    // Perform strict validation checks on local room
+    if (localRoom.expiresAt && Date.now() > localRoom.expiresAt) {
+      return { success: false, error: 'This room code has expired. Please ask the host for a new code.' };
+    }
+
+    if (localRoom.hostId === user.uid && (!localRoom.guestId || localRoom.guestId !== user.uid)) {
+      return { success: false, error: 'You are the host of this room. You cannot join your own room as Player 2.' };
+    }
+
+    const currentStatus = localRoom.status;
+    if (currentStatus !== 'WAITING' && currentStatus !== 'waiting' && localRoom.guestId !== user.uid) {
+      if (currentStatus === 'READY' || currentStatus === 'STARTING' || currentStatus === 'IN_PROGRESS' || currentStatus === 'MATCHED' || currentStatus === 'active') {
+        return { success: false, error: 'This room is already full or match is in progress.' };
+      }
+      if (currentStatus === 'CANCELLED') {
+        return { success: false, error: 'This room was cancelled by the host.' };
+      }
+      if (currentStatus === 'COMPLETED' || currentStatus === 'finished') {
+        return { success: false, error: 'This room match has already finished.' };
+      }
+    }
+
+    if (localRoom.playerCount >= 2 && localRoom.guestId && localRoom.guestId !== user.uid) {
+      return { success: false, error: 'This room is already full (2/2 players).' };
+    }
+
     const now = Date.now();
     let currentGameState: AuthoritativeGameState;
     try {
@@ -695,11 +738,15 @@ export async function joinMultiplayerRoom(
     currentGameState.turnStartedAt = now;
     currentGameState.turnDeadline = now + 20000;
 
+    const matchId = `MATCH-${localRoom.roomCode}-${now.toString().slice(-4)}`;
+
     const mergedRoom: ServerGameRoom = {
       ...localRoom,
       guestId: user.uid,
       guestName: guestNameInput,
-      status: 'MATCHED',
+      playerCount: 2,
+      status: 'READY',
+      matchId,
       gameState: JSON.stringify(currentGameState),
       updatedAt: new Date().toISOString(),
     };
@@ -710,7 +757,9 @@ export async function joinMultiplayerRoom(
       await updateDoc(doc(db, 'game_rooms', mergedRoom.roomId), {
         guestId: user.uid,
         guestName: guestNameInput,
-        status: 'MATCHED',
+        playerCount: 2,
+        status: 'READY',
+        matchId,
         gameState: mergedRoom.gameState,
         updatedAt: mergedRoom.updatedAt,
       });
@@ -721,7 +770,7 @@ export async function joinMultiplayerRoom(
     return { success: true, room: mergedRoom };
   }
 
-  // 2. Try Firestore lookup & transaction if not in local storage
+  // 2. Try Firestore lookup & transaction
   try {
     let targetDocRef = doc(db, 'game_rooms', cleanCode);
     let snap = await getDoc(targetDocRef);
@@ -735,7 +784,7 @@ export async function joinMultiplayerRoom(
     }
 
     if (!snap.exists()) {
-      return { success: false, error: `Room "${roomIdInput.trim()}" not found. Please verify the code with the host.` };
+      return { success: false, error: `Room "${roomCodeInput.trim()}" not found. Please verify the code with the host.` };
     }
 
     const joinedRoom = await runTransaction(db, async (transaction) => {
@@ -746,16 +795,29 @@ export async function joinMultiplayerRoom(
 
       const roomData = roomSnap.data() as ServerGameRoom;
 
+      if (roomData.expiresAt && Date.now() > roomData.expiresAt) {
+        throw new Error('This room code has expired. Please ask the host for a new code.');
+      }
+
       if (roomData.hostId === user.uid && roomData.guestId !== user.uid) {
-        if (roomData.guestName) return roomData;
+        throw new Error('You are the host of this room. You cannot join your own room as Player 2.');
       }
 
-      if (roomData.status !== 'waiting' && (roomData.status as string) !== 'WAITING' && roomData.guestId !== user.uid) {
-        throw new Error(`Room "${cleanCode}" is already in status "${roomData.status}".`);
+      const status = roomData.status;
+      if (status !== 'WAITING' && status !== 'waiting' && roomData.guestId !== user.uid) {
+        if (status === 'READY' || status === 'STARTING' || status === 'IN_PROGRESS' || status === 'MATCHED' || status === 'active') {
+          throw new Error('This room is already full or match is in progress.');
+        }
+        if (status === 'CANCELLED') {
+          throw new Error('This room was cancelled by the host.');
+        }
+        if (status === 'COMPLETED' || status === 'finished') {
+          throw new Error('This room match has already finished.');
+        }
       }
 
-      if (roomData.guestId && roomData.guestId !== user.uid) {
-        throw new Error(`Room "${cleanCode}" already has Player 2 connected.`);
+      if (roomData.playerCount >= 2 && roomData.guestId && roomData.guestId !== user.uid) {
+        throw new Error('This room is already full (2/2 players).');
       }
 
       let currentGameState: AuthoritativeGameState;
@@ -768,11 +830,14 @@ export async function joinMultiplayerRoom(
       const now = Date.now();
       currentGameState.turnStartedAt = now;
       currentGameState.turnDeadline = now + 20000;
+      const matchId = `MATCH-${roomData.roomCode || roomData.roomId}-${now.toString().slice(-4)}`;
 
       const updatedFields: Partial<ServerGameRoom> = {
         guestId: user.uid,
         guestName: guestNameInput,
-        status: 'MATCHED',
+        playerCount: 2,
+        status: 'READY',
+        matchId,
         gameState: JSON.stringify(currentGameState),
         updatedAt: new Date().toISOString(),
       };
@@ -793,14 +858,77 @@ export async function joinMultiplayerRoom(
     if (isQuotaError(err)) {
       notifyQuotaExceeded();
     }
-    console.error('[SERVER] Room join error:', err);
+    console.error('[ROOM_JOIN_ERROR]', err);
     return { success: false, error: err.message || 'Failed to join room.' };
   }
 }
 
-export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom) => void): () => void {
-  console.log(`[ROOM_LISTEN] Attaching listener for game_rooms/${roomId}`);
+export async function cancelMultiplayerRoom(roomId: string): Promise<void> {
+  const currentLocal = getLocalRoom(roomId);
+  if (currentLocal) {
+    const updated: ServerGameRoom = {
+      ...currentLocal,
+      status: 'CANCELLED',
+      updatedAt: new Date().toISOString(),
+    };
+    saveLocalRoom(updated);
+  }
 
+  try {
+    const docRef = doc(db, 'game_rooms', roomId);
+    await updateDoc(docRef, {
+      status: 'CANCELLED',
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    if (isQuotaError(e)) notifyQuotaExceeded();
+  }
+}
+
+export async function requestMultiplayerRematch(roomId: string, playerName: string, role: 'host' | 'guest'): Promise<void> {
+  const currentLocal = getLocalRoom(roomId);
+  const rematchState: RematchState = {
+    requestedBy: playerName,
+    requestedByRole: role,
+    status: 'PENDING',
+    updatedAt: Date.now(),
+  };
+
+  if (currentLocal) {
+    saveLocalRoom({ ...currentLocal, rematchState });
+  }
+
+  try {
+    const docRef = doc(db, 'game_rooms', roomId);
+    await updateDoc(docRef, { rematchState });
+  } catch (e) {
+    if (isQuotaError(e)) notifyQuotaExceeded();
+  }
+}
+
+export async function respondMultiplayerRematch(roomId: string, status: 'APPROVED' | 'REJECTED'): Promise<void> {
+  const currentLocal = getLocalRoom(roomId);
+  if (currentLocal && currentLocal.rematchState) {
+    const updatedState: RematchState = {
+      ...currentLocal.rematchState,
+      status,
+      updatedAt: Date.now(),
+    };
+    saveLocalRoom({ ...currentLocal, rematchState: updatedState });
+  }
+
+  try {
+    const docRef = doc(db, 'game_rooms', roomId);
+    await updateDoc(docRef, {
+      'rematchState.status': status,
+      'rematchState.updatedAt': Date.now(),
+    });
+  } catch (e) {
+    if (isQuotaError(e)) notifyQuotaExceeded();
+  }
+}
+
+export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom) => void): () => void {
   let channel: BroadcastChannel | null = null;
   const handleMessage = (e: MessageEvent) => {
     if (e.data) callback(e.data);
@@ -829,6 +957,22 @@ export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom)
     callback(initialLocal);
   }
 
+  // Active 1-second Polling Interval for cross-device resilience
+  const pollInterval = setInterval(async () => {
+    try {
+      const snap = await getDoc(doc(db, 'game_rooms', roomId));
+      if (snap.exists()) {
+        const roomData = snap.data() as ServerGameRoom;
+        saveLocalRoom(roomData);
+        callback(roomData);
+      }
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        notifyQuotaExceeded();
+      }
+    }
+  }, 1000);
+
   const unsubFirestore = onSnapshot(
     doc(db, 'game_rooms', roomId),
     (snap) => {
@@ -842,12 +986,13 @@ export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom)
       if (isQuotaError(err)) {
         notifyQuotaExceeded();
       } else {
-        console.warn(`[ROOM_LISTEN] Room subscription error for ${roomId}:`, err.message);
+        console.warn(`[ROOM_SUBSCRIPTION_WARN] Room ${roomId}:`, err.message);
       }
     }
   );
 
   return () => {
+    clearInterval(pollInterval);
     if (channel) {
       channel.removeEventListener('message', handleMessage);
       channel.close();
@@ -863,7 +1008,7 @@ export async function updateRoomGameState(
   roomId: string,
   gameState: any,
   turn?: 'host' | 'guest',
-  status?: 'waiting' | 'active' | 'finished',
+  status?: ServerGameRoom['status'],
   winner?: string
 ): Promise<void> {
   const currentLocal = getLocalRoom(roomId);

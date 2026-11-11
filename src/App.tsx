@@ -55,6 +55,9 @@ import {
   PlayerTransaction,
   createMultiplayerRoom,
   joinMultiplayerRoom,
+  cancelMultiplayerRoom,
+  requestMultiplayerRematch,
+  respondMultiplayerRematch,
   subscribeToRoom,
   updateRoomGameState,
   ServerGameRoom,
@@ -983,6 +986,7 @@ export default function App() {
   const [rematchPrompt, setRematchPrompt] = useState<{
     type: 'restart' | 'rematch';
     status: 'requesting' | 'approved' | 'declined';
+    requestedBy?: string;
   } | null>(null);
 
   // Firestore Quota Exceeded banner state
@@ -1001,6 +1005,21 @@ export default function App() {
   const authoritativeSequenceRef = useRef<number>(0);
   const authoritativeDeadlineRef = useRef<number>(Date.now() + 20000);
   const lastShotSequenceRef = useRef<number>(0);
+  const shotStartTimeRef = useRef<number>(0);
+
+  // Reset countdown timer & turn deadline upon player response or movement
+  const notifyActivity = useCallback(() => {
+    const newDeadline = Date.now() + 20000;
+    lastActivityTimeRef.current = Date.now();
+    authoritativeDeadlineRef.current = newDeadline;
+    lastTickedSecondRef.current = -1;
+    setIdleSeconds(0);
+    setTurnTimeLeft(20);
+
+    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && currentTurnRef.current === 'player') {
+      updateRoomGameState(activeRoom.gameId, { turnDeadline: newDeadline });
+    }
+  }, [matchmakingMode, activeRoom.gameId]);
 
   // Refs for 60fps canvas loop
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1179,16 +1198,6 @@ export default function App() {
       alpha: 1,
       vy: -1.6,
     });
-  }, []);
-
-  // Reset countdown timer & turn deadline upon player response or movement
-  const notifyActivity = useCallback(() => {
-    const newDeadline = Date.now() + 20000;
-    lastActivityTimeRef.current = Date.now();
-    authoritativeDeadlineRef.current = newDeadline;
-    lastTickedSecondRef.current = -1;
-    setIdleSeconds(0);
-    setTurnTimeLeft(20);
   }, []);
 
   /* ==========================================================================
@@ -1444,32 +1453,42 @@ export default function App() {
      ========================================================================== */
   const initiateRestartOrRematch = (type: 'restart' | 'rematch') => {
     setActiveModal(null);
-    setRematchPrompt({
-      type,
-      status: 'requesting',
-    });
-
-    // Simulated opponent review response after a realistic delay
-    setTimeout(() => {
-      setRematchPrompt((prev) => {
-        if (!prev || prev.status !== 'requesting') return prev;
-        return { ...prev, status: 'approved' };
+    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+      setRematchPrompt({
+        type,
+        status: 'requesting',
+        requestedBy: playerName,
+      });
+      requestMultiplayerRematch(activeRoom.gameId, playerName, localRoleRef.current);
+    } else {
+      setRematchPrompt({
+        type,
+        status: 'requesting',
+        requestedBy: playerName,
       });
 
+      // Simulated opponent review response after a realistic delay for computer mode
       setTimeout(() => {
         setRematchPrompt((prev) => {
-          if (!prev || prev.status !== 'approved') return null;
-          if (type === 'rematch') {
-            handleRematch();
-          } else {
-            setGameOverResult(null);
-            initializeBoard();
-            setScreen('gameplay');
-          }
-          return null;
+          if (!prev || prev.status !== 'requesting') return prev;
+          return { ...prev, status: 'approved' };
         });
-      }, 900);
-    }, 1300);
+
+        setTimeout(() => {
+          setRematchPrompt((prev) => {
+            if (!prev || prev.status !== 'approved') return null;
+            if (type === 'rematch') {
+              handleRematch();
+            } else {
+              setGameOverResult(null);
+              initializeBoard();
+              setScreen('gameplay');
+            }
+            return null;
+          });
+        }, 900);
+      }, 1300);
+    }
   };
 
 
@@ -1523,7 +1542,17 @@ export default function App() {
     const unsub = subscribeToRoom(activeRoom.gameId, (serverRoom) => {
       console.log(`[HOST] Room update received`);
 
-      const isMatchedStatus = serverRoom.status === 'MATCHED' || serverRoom.status === 'active' || (serverRoom.status as string) === 'MATCHED';
+      const isMatchedStatus =
+        serverRoom.status === 'READY' ||
+        serverRoom.status === 'ready' ||
+        serverRoom.status === 'MATCHED' ||
+        serverRoom.status === 'matched' ||
+        serverRoom.status === 'STARTING' ||
+        serverRoom.status === 'IN_PROGRESS' ||
+        serverRoom.status === 'active' ||
+        serverRoom.status === 'playing' ||
+        serverRoom.playerCount >= 2;
+
       const hasGuestName = Boolean(serverRoom.guestName && serverRoom.guestName.trim());
 
       if (!isTransitioned && isMatchedStatus && hasGuestName) {
@@ -1619,9 +1648,47 @@ export default function App() {
 
   // Authoritative Real-Time Multiplayer State & Opponent Shot Listener during gameplay
   useEffect(() => {
-    if (screen !== 'gameplay' || !activeRoom.gameId) return;
+    if ((screen !== 'gameplay' && screen !== 'room_waiting') || !activeRoom.gameId) return;
 
     const unsub = subscribeToRoom(activeRoom.gameId, (serverRoom) => {
+      // Point 4: Room Cancellation / Abandonment Listener
+      if (serverRoom.status === 'CANCELLED' || serverRoom.status === 'ABANDONED') {
+        setActiveModal(null);
+        setGameOverResult(null);
+        setRematchPrompt(null);
+        setScreen('create_game');
+        alert('Match Cancelled! The other player left the game. Returning to betting selection.');
+        return;
+      }
+
+      // Point 5: Rematch Approval / Rejection Listener in Multiplayer
+      if (serverRoom.rematchState && matchmakingMode === 'PRIVATE_ROOM') {
+        const rem = serverRoom.rematchState;
+        if (rem.status === 'PENDING' && rem.requestedBy !== playerName) {
+          // Opponent requested rematch -> Show approval popup
+          setRematchPrompt({
+            type: 'rematch',
+            status: 'requesting',
+            requestedBy: rem.requestedBy,
+          });
+        } else if (rem.status === 'APPROVED') {
+          setRematchPrompt({ type: 'rematch', status: 'approved' });
+          setTimeout(() => {
+            setGameOverResult(null);
+            setRematchPrompt(null);
+            initializeBoard();
+            setScreen('gameplay');
+          }, 800);
+        } else if (rem.status === 'REJECTED') {
+          setRematchPrompt({ type: 'rematch', status: 'declined' });
+          setTimeout(() => {
+            setGameOverResult(null);
+            setRematchPrompt(null);
+            setScreen('create_game');
+          }, 1500);
+        }
+      }
+
       if (!serverRoom.gameState) return;
 
       try {
@@ -1723,7 +1790,7 @@ export default function App() {
     return () => {
       if (unsub) unsub();
     };
-  }, [screen, activeRoom.gameId, playerName, activeRoom.hostName]);
+  }, [screen, activeRoom.gameId, playerName, activeRoom.hostName, matchmakingMode]);
 
   /* ==========================================================================
      PHYSICS SIMULATION STEP (RULE 1: STRONGER FRAME LOGIC & RULE 2: FAIR POCKETS)
@@ -1731,7 +1798,7 @@ export default function App() {
   const runPhysicsStep = useCallback((dt: number) => {
     const RESTITUTION_COIN = 0.83;
     const RESTITUTION_WALL = 0.76;
-    const STOP_VELOCITY = 0.045;
+    const STOP_VELOCITY = 0.22;
 
     const coins = coinsRef.current;
     const striker = strikerRef.current;
@@ -1914,11 +1981,23 @@ export default function App() {
      ========================================================================== */
   const checkTurnSettlement = useCallback(() => {
     const allDiscs = [strikerRef.current, ...coinsRef.current].filter((c) => !c.isPocketed);
+    const shotElapsed = Date.now() - shotStartTimeRef.current;
+
+    // Point 3: Hard 4.2-second timeout guard to prevent striker/coins from getting stuck vibrating
+    if (isTurnInProgressRef.current && shotElapsed > 4200) {
+      allDiscs.forEach((d) => {
+        d.vx = 0;
+        d.vy = 0;
+        d.spinVel = 0;
+        d.isSinking = false;
+      });
+    }
+
     const moving = allDiscs.some(
-      (d) => Math.hypot(d.vx, d.vy) > 0.05 || d.isSinking
+      (d) => Math.hypot(d.vx, d.vy) > 0.18 || d.isSinking
     );
 
-    if (moving) {
+    if (moving && (!isTurnInProgressRef.current || shotElapsed <= 4200)) {
       setIsStrikerMoving(true);
       return;
     }
@@ -1946,8 +2025,12 @@ export default function App() {
     const playerPocketedThisTurn = isHost ? whitePocketedThisTurn : blackPocketedThisTurn;
     const botPocketedThisTurn = isHost ? blackPocketedThisTurn : whitePocketedThisTurn;
 
-    let newWhiteTotal = playerWhitePocketed + whitePocketedThisTurn;
-    let newBlackTotal = botBlackPocketed + blackPocketedThisTurn;
+    // Point 1: Calculate actual total pocketed coins directly from the board state to guarantee 100% accuracy
+    const actualWhiteTotal = coinsRef.current.filter((c) => c.type === 'white' && c.isPocketed).length;
+    const actualBlackTotal = coinsRef.current.filter((c) => c.type === 'black' && c.isPocketed).length;
+
+    let newWhiteTotal = actualWhiteTotal;
+    let newBlackTotal = actualBlackTotal;
 
     let nextWho: 'player' | 'bot' = currentWho === 'player' ? 'bot' : 'player';
 
@@ -2529,6 +2612,7 @@ export default function App() {
 
         isTurnInProgressRef.current = true;
         setIsStrikerMoving(true);
+        shotStartTimeRef.current = Date.now();
 
         strikerRef.current.vx = Math.cos(shotAngle) * impulseSpeed;
         strikerRef.current.vy = Math.sin(shotAngle) * impulseSpeed;
@@ -3938,7 +4022,12 @@ export default function App() {
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={() => setScreen('create_game')}
+                  onClick={async () => {
+                    if (activeRoom.gameId) {
+                      await cancelMultiplayerRoom(activeRoom.gameId);
+                    }
+                    setScreen('create_game');
+                  }}
                   className="flex-1 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-bold text-xs border border-neutral-700 transition-all active:scale-95"
                 >
                   Cancel / Back
@@ -4426,7 +4515,10 @@ export default function App() {
 
             <div className="space-y-2 pt-1">
               <button
-                onClick={() => {
+                onClick={async () => {
+                  if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+                    await cancelMultiplayerRoom(activeRoom.gameId);
+                  }
                   setActiveModal(null);
                   setGameOverResult(null);
                   setScreen('create_game');
@@ -4558,30 +4650,83 @@ export default function App() {
           <div className="max-w-sm w-full bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-center space-y-4 shadow-2xl relative">
             {rematchPrompt.status === 'requesting' && (
               <>
-                <div className="w-14 h-14 mx-auto rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-md">
-                  <RotateCcw className="w-7 h-7 animate-spin" />
-                </div>
-                <div className="space-y-1">
-                  <h3 className="font-display font-black text-xl text-white">
-                    {rematchPrompt.type === 'rematch' ? 'Rematch Requested' : 'Restart Requested'}
-                  </h3>
-                  <p className="text-xs text-neutral-300">
-                    Waiting for <span className="font-bold text-amber-400">{opponentName || 'Computer'}</span> to review and decide your {rematchPrompt.type === 'rematch' ? 'rematch' : 'restart'} request...
-                  </p>
-                </div>
+                {rematchPrompt.requestedBy && rematchPrompt.requestedBy !== playerName ? (
+                  <>
+                    <div className="w-14 h-14 mx-auto rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-md">
+                      <RotateCcw className="w-7 h-7" />
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="font-display font-black text-xl text-white">
+                        {rematchPrompt.type === 'rematch' ? 'Rematch Requested' : 'Restart Requested'}
+                      </h3>
+                      <p className="text-xs text-neutral-300">
+                        <span className="font-bold text-amber-400">{rematchPrompt.requestedBy}</span> wants to {rematchPrompt.type === 'rematch' ? 'rematch' : 'restart'} for ₹{activeRoom.betAmount || selectedBet}!
+                      </p>
+                    </div>
 
-                {/* Opponent Decision Banner (Exclusive to Opponent/Computer - Player cannot choose) */}
-                <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-3.5 space-y-1.5 text-xs">
-                  <div className="flex items-center justify-center gap-2 text-amber-400">
-                    <div className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                    <span className="text-[11px] font-bold uppercase tracking-wider">
-                      {opponentName || 'Computer'} is deciding...
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-neutral-400 block">
-                    Opponent holds exclusive approval authority for match restarts and rematches.
-                  </span>
-                </div>
+                    <div className="space-y-2 pt-2">
+                      <button
+                        onClick={async () => {
+                          if (activeRoom.gameId) {
+                            await respondMultiplayerRematch(activeRoom.gameId, 'APPROVED');
+                          }
+                          setRematchPrompt({ type: 'rematch', status: 'approved' });
+                          setTimeout(() => {
+                            setGameOverResult(null);
+                            setRematchPrompt(null);
+                            handleRematch();
+                          }, 800);
+                        }}
+                        className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all active:scale-95"
+                      >
+                        APPROVE REMATCH
+                      </button>
+                      <button
+                        onClick={async () => {
+                          if (activeRoom.gameId) {
+                            await respondMultiplayerRematch(activeRoom.gameId, 'REJECTED');
+                          }
+                          setRematchPrompt({ type: 'rematch', status: 'declined' });
+                          setTimeout(() => {
+                            setGameOverResult(null);
+                            setRematchPrompt(null);
+                            setScreen('create_game');
+                          }, 1200);
+                        }}
+                        className="w-full py-2.5 rounded-xl bg-red-600/80 hover:bg-red-500 text-white font-bold text-xs transition-all active:scale-95"
+                      >
+                        REJECT
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-14 h-14 mx-auto rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-md">
+                      <RotateCcw className="w-7 h-7 animate-spin" />
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="font-display font-black text-xl text-white">
+                        {rematchPrompt.type === 'rematch' ? 'Rematch Requested' : 'Restart Requested'}
+                      </h3>
+                      <p className="text-xs text-neutral-300">
+                        Waiting for <span className="font-bold text-amber-400">{opponentName || 'Computer'}</span> to review and decide your {rematchPrompt.type === 'rematch' ? 'rematch' : 'restart'} request...
+                      </p>
+                    </div>
+
+                    {/* Opponent Decision Banner */}
+                    <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-3.5 space-y-1.5 text-xs">
+                      <div className="flex items-center justify-center gap-2 text-amber-400">
+                        <div className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                        <span className="text-[11px] font-bold uppercase tracking-wider">
+                          {opponentName || 'Computer'} is deciding...
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-neutral-400 block">
+                        Opponent holds exclusive approval authority for match restarts and rematches.
+                      </span>
+                    </div>
+                  </>
+                )}
               </>
             )}
 
