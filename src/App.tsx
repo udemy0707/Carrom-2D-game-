@@ -401,7 +401,7 @@ const BOT_BASELINE_Y = 152;
 // Maximum pull-back drag distance for full power
 const MAX_DRAG_DIST = 175;
 // Maximum realistic speed (tuned for realistic carrom sliding)
-const MAX_STRIKE_VELOCITY = 18.5;
+const MAX_STRIKE_VELOCITY = 21.5;
 
 // 6 Betting Options: 50, 100, 200, 500, 1000, 2000
 const BETTING_AMOUNTS = [50, 100, 200, 500, 1000, 2000];
@@ -481,6 +481,386 @@ interface GameRoom {
   winnerPrize: number; // 2 * betAmount * 0.90
   platformRake: number; // 2 * betAmount * 0.10
   status: 'waiting' | 'playing' | 'finished';
+}
+
+/* ==========================================================================
+   OFFSCREEN 120 FPS STATIC CARROM BOARD PRE-RENDERER
+   Pre-renders all heavy wood veneers, 3D shadows, pockets, and compass
+   so the 120fps render loop completes in <0.2ms per frame.
+   ========================================================================== */
+function drawStaticCarromBoard(ctx: CanvasRenderingContext2D, centerImg: HTMLImageElement | null) {
+  // 1. SOLID POLISHED ROSEWOOD OUTER FRAME
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(4, 4, BOARD_SIZE - 8, BOARD_SIZE - 8, 22);
+  const woodGrad = ctx.createLinearGradient(0, 0, BOARD_SIZE, BOARD_SIZE);
+  woodGrad.addColorStop(0, '#381708');
+  woodGrad.addColorStop(0.3, '#522510');
+  woodGrad.addColorStop(0.7, '#642E15');
+  woodGrad.addColorStop(1, '#260F04');
+  ctx.fillStyle = woodGrad;
+  ctx.fill();
+
+  // Outer gold trim hairline
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = '#B88230';
+  ctx.stroke();
+
+  // Metallic corner reinforcement inlays
+  const cornerOffsets = [
+    { x: 12, y: 12 },
+    { x: BOARD_SIZE - 28, y: 12 },
+    { x: 12, y: BOARD_SIZE - 28 },
+    { x: BOARD_SIZE - 28, y: BOARD_SIZE - 28 },
+  ];
+  ctx.fillStyle = '#D49E35';
+  for (const co of cornerOffsets) {
+    ctx.beginPath();
+    ctx.roundRect(co.x, co.y, 16, 16, 4);
+    ctx.fill();
+    ctx.strokeStyle = '#6E420C';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // 2. PLAYING SURFACE (Real Warm Indian Carrom Beechwood Veneer)
+  ctx.save();
+  const plyGrad = ctx.createRadialGradient(400, 400, 40, 400, 400, 490);
+  plyGrad.addColorStop(0, '#E8CBA0');
+  plyGrad.addColorStop(0.55, '#DDB681');
+  plyGrad.addColorStop(1, '#C89D62');
+  ctx.fillStyle = plyGrad;
+  ctx.fillRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, PLAY_MAX - PLAY_MIN);
+
+  // Subtle natural wood grain lines across veneer
+  ctx.strokeStyle = 'rgba(125, 75, 30, 0.04)';
+  ctx.lineWidth = 1;
+  for (let gy = PLAY_MIN; gy < PLAY_MAX; gy += 14) {
+    ctx.beginPath();
+    ctx.moveTo(PLAY_MIN, gy);
+    ctx.lineTo(PLAY_MAX, gy);
+    ctx.stroke();
+  }
+
+  // 3D INNER FRAME SHADOWS & REBOUND CUSHION BUMPERS
+  const topShadow = ctx.createLinearGradient(0, PLAY_MIN, 0, PLAY_MIN + 26);
+  topShadow.addColorStop(0, 'rgba(12, 5, 2, 0.72)');
+  topShadow.addColorStop(0.35, 'rgba(20, 8, 3, 0.42)');
+  topShadow.addColorStop(1, 'rgba(25, 12, 4, 0)');
+  ctx.fillStyle = topShadow;
+  ctx.fillRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, 26);
+
+  const leftShadow = ctx.createLinearGradient(PLAY_MIN, 0, PLAY_MIN + 26, 0);
+  leftShadow.addColorStop(0, 'rgba(12, 5, 2, 0.72)');
+  leftShadow.addColorStop(0.35, 'rgba(20, 8, 3, 0.42)');
+  leftShadow.addColorStop(1, 'rgba(25, 12, 4, 0)');
+  ctx.fillStyle = leftShadow;
+  ctx.fillRect(PLAY_MIN, PLAY_MIN, 26, PLAY_MAX - PLAY_MIN);
+
+  const bottomShadow = ctx.createLinearGradient(0, PLAY_MAX, 0, PLAY_MAX - 18);
+  bottomShadow.addColorStop(0, 'rgba(15, 6, 2, 0.52)');
+  bottomShadow.addColorStop(1, 'rgba(20, 10, 4, 0)');
+  ctx.fillStyle = bottomShadow;
+  ctx.fillRect(PLAY_MIN, PLAY_MAX - 18, PLAY_MAX - PLAY_MIN, 18);
+
+  const rightShadow = ctx.createLinearGradient(PLAY_MAX, 0, PLAY_MAX - 18, 0);
+  rightShadow.addColorStop(0, 'rgba(15, 6, 2, 0.52)');
+  rightShadow.addColorStop(1, 'rgba(20, 10, 4, 0)');
+  ctx.fillStyle = rightShadow;
+  ctx.fillRect(PLAY_MAX - 18, PLAY_MIN, 18, PLAY_MAX - PLAY_MIN);
+
+  // Rubber Cushion Strips
+  ctx.strokeStyle = '#220D04';
+  ctx.lineWidth = 3.5;
+  ctx.strokeRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, PLAY_MAX - PLAY_MIN);
+
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(PLAY_MIN + 2, PLAY_MIN + 2, PLAY_MAX - PLAY_MIN - 4, PLAY_MAX - PLAY_MIN - 4);
+  ctx.restore();
+
+  // 3. AUTHENTIC CIRCULAR NET HOLES WITH WOVEN NET MESH
+  for (const pocket of POCKETS) {
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS + 4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS + 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#180B05';
+    ctx.fill();
+
+    const holeGrad = ctx.createRadialGradient(pocket.x - 6, pocket.y - 6, 2, pocket.x, pocket.y, POCKET_HOLE_RADIUS);
+    holeGrad.addColorStop(0, '#020305');
+    holeGrad.addColorStop(0.8, '#080A0E');
+    holeGrad.addColorStop(1, '#1A0E08');
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = holeGrad;
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS - 1, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+    ctx.lineWidth = 1.2;
+    for (let offset = -44; offset <= 44; offset += 8) {
+      ctx.beginPath();
+      ctx.moveTo(pocket.x - 44, pocket.y + offset);
+      ctx.lineTo(pocket.x + 44, pocket.y + offset + 26);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(pocket.x - 44, pocket.y + offset + 26);
+      ctx.lineTo(pocket.x + 44, pocket.y + offset);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.lineWidth = 2.2;
+    ctx.strokeStyle = 'rgba(196, 142, 54, 0.55)';
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 4. CENTER CIRCULAR COMPASS DESIGN
+  ctx.save();
+  if (centerImg && centerImg.complete && centerImg.naturalWidth > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(400, 400, 114, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(centerImg, 400 - 114, 400 - 114, 228, 228);
+    ctx.restore();
+  }
+
+  const compassBrown = '#361807';
+  const compassLight = '#F3E2C7';
+  const compassDark = '#251004';
+
+  ctx.strokeStyle = compassBrown;
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.arc(400, 400, 108, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(400, 400, 104, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.setLineDash([5, 5]);
+  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = '#4A230A';
+  ctx.arc(400, 400, 86, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.strokeStyle = compassBrown;
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.arc(400, 400, 64, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const numPoints = 8;
+  for (let p = 0; p < numPoints; p++) {
+    const isCardinal = p % 2 === 0;
+    const tipAngle = (p * Math.PI) / 4;
+    const tipRadius = isCardinal ? 104 : 82;
+    const baseWidthAngle = isCardinal ? 0.22 : 0.18;
+
+    const tipX = 400 + Math.cos(tipAngle) * tipRadius;
+    const tipY = 400 + Math.sin(tipAngle) * tipRadius;
+
+    const leftBaseAngle = tipAngle - baseWidthAngle;
+    const rightBaseAngle = tipAngle + baseWidthAngle;
+    const baseRadius = 22;
+
+    const leftBaseX = 400 + Math.cos(leftBaseAngle) * baseRadius;
+    const leftBaseY = 400 + Math.sin(leftBaseAngle) * baseRadius;
+    const rightBaseX = 400 + Math.cos(rightBaseAngle) * baseRadius;
+    const rightBaseY = 400 + Math.sin(rightBaseAngle) * baseRadius;
+
+    ctx.beginPath();
+    ctx.moveTo(400, 400);
+    ctx.lineTo(leftBaseX, leftBaseY);
+    ctx.lineTo(tipX, tipY);
+    ctx.closePath();
+    ctx.fillStyle = compassDark;
+    ctx.fill();
+    ctx.strokeStyle = '#1A0C04';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(400, 400);
+    ctx.lineTo(rightBaseX, rightBaseY);
+    ctx.lineTo(tipX, tipY);
+    ctx.closePath();
+    ctx.fillStyle = compassLight;
+    ctx.fill();
+    ctx.strokeStyle = '#1A0C04';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(400, 400);
+    ctx.lineTo(tipX, tipY);
+    ctx.strokeStyle = '#1E0D04';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = compassBrown;
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.arc(400, 400, 22, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(400, 400, 16, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Central Bullseye
+  ctx.beginPath();
+  ctx.arc(400, 400, 9.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#C02626';
+  ctx.fill();
+  ctx.strokeStyle = '#260E03';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+
+  // 5. IDENTICAL 4 BASELINES
+  const BASELINE_OFFSET = 248;
+  const TRACK_WIDTH = 28;
+  const LINE_SEP = 12;
+  const CIRCLE_RADIUS = 18;
+  const RED_DOT_RADIUS = 5.5;
+
+  const drawBaseline = (isVertical: boolean, axisVal: number) => {
+    ctx.save();
+    const minCoord = BASELINE_MIN_X;
+    const maxCoord = BASELINE_MAX_X;
+    const span = maxCoord - minCoord;
+
+    ctx.beginPath();
+    if (isVertical) {
+      ctx.roundRect(axisVal - TRACK_WIDTH / 2, minCoord - 14, TRACK_WIDTH, span + 28, 14);
+    } else {
+      ctx.roundRect(minCoord - 14, axisVal - TRACK_WIDTH / 2, span + 28, TRACK_WIDTH, 14);
+    }
+    ctx.fillStyle = 'rgba(196, 142, 88, 0.28)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(92, 45, 18, 0.55)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(75, 32, 10, 0.75)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    if (isVertical) {
+      ctx.moveTo(axisVal - LINE_SEP / 2, minCoord);
+      ctx.lineTo(axisVal - LINE_SEP / 2, maxCoord);
+      ctx.moveTo(axisVal + LINE_SEP / 2, minCoord);
+      ctx.lineTo(axisVal + LINE_SEP / 2, maxCoord);
+    } else {
+      ctx.moveTo(minCoord, axisVal - LINE_SEP / 2);
+      ctx.lineTo(maxCoord, axisVal - LINE_SEP / 2);
+      ctx.moveTo(minCoord, axisVal + LINE_SEP / 2);
+      ctx.lineTo(maxCoord, axisVal + LINE_SEP / 2);
+    }
+    ctx.stroke();
+
+    const endpoints = [minCoord, maxCoord];
+    for (const ep of endpoints) {
+      const cx = isVertical ? axisVal : ep;
+      const cy = isVertical ? ep : axisVal;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, CIRCLE_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = '#C89360';
+      ctx.fill();
+      ctx.strokeStyle = '#5E270A';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, RED_DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = '#D92D20';
+      ctx.fill();
+      ctx.strokeStyle = '#381303';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  drawBaseline(false, 400 + BASELINE_OFFSET);
+  drawBaseline(false, 400 - BASELINE_OFFSET);
+  drawBaseline(true, 400 - BASELINE_OFFSET);
+  drawBaseline(true, 400 + BASELINE_OFFSET);
+
+  // 6. FOUL POINTER ARROWS TOWARDS 4 CORNERS
+  for (const pocket of POCKETS) {
+    const ang = Math.atan2(pocket.y - 400, pocket.x - 400);
+    const arrowStartDist = 120;
+    const arrowEndDist = 265;
+
+    const startX = 400 + Math.cos(ang) * arrowStartDist;
+    const startY = 400 + Math.sin(ang) * arrowStartDist;
+    const endX = 400 + Math.cos(ang) * arrowEndDist;
+    const endY = 400 + Math.sin(ang) * arrowEndDist;
+
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(endX, endY);
+    ctx.strokeStyle = 'rgba(75, 32, 10, 0.7)';
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    const hookRadius = 26;
+    ctx.save();
+    ctx.translate(endX, endY);
+    ctx.rotate(ang);
+
+    ctx.beginPath();
+    ctx.arc(0, 0, hookRadius, -Math.PI * 0.72, Math.PI * 0.72);
+    ctx.strokeStyle = 'rgba(75, 32, 10, 0.75)';
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    const a1Ang = -Math.PI * 0.72;
+    const a1X = Math.cos(a1Ang) * hookRadius;
+    const a1Y = Math.sin(a1Ang) * hookRadius;
+    ctx.beginPath();
+    ctx.moveTo(a1X, a1Y);
+    ctx.lineTo(a1X + 4, a1Y - 6);
+    ctx.lineTo(a1X - 6, a1Y - 4);
+    ctx.closePath();
+    ctx.fillStyle = '#4D2208';
+    ctx.fill();
+
+    const a2Ang = Math.PI * 0.72;
+    const a2X = Math.cos(a2Ang) * hookRadius;
+    const a2Y = Math.sin(a2Ang) * hookRadius;
+    ctx.beginPath();
+    ctx.moveTo(a2X, a2Y);
+    ctx.lineTo(a2X + 4, a2Y + 6);
+    ctx.lineTo(a2X - 6, a2Y + 4);
+    ctx.closePath();
+    ctx.fillStyle = '#4D2208';
+    ctx.fill();
+
+    ctx.restore();
+  }
 }
 
 /* ==========================================================================
@@ -1025,7 +1405,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Authoritative State Tracking Refs for 100% Real-Time Multiplayer Sync
   const authoritativeSequenceRef = useRef<number>(0);
   const authoritativeDeadlineRef = useRef<number>(Date.now() + 20000);
   const lastShotSequenceRef = useRef<number>(0);
@@ -1033,17 +1412,57 @@ export default function App() {
   const targetOpponentStrikerXRef = useRef<number>(400);
   const lastSliderBroadcastRef = useRef<number>(0);
   const lastDragBroadcastRef = useRef<number>(0);
+  const lastOpponentAimTimeRef = useRef<number>(0);
 
-  // Reset countdown timer & turn deadline upon player response or movement (Request 1)
+  // 120 FPS Offscreen Board Pre-rendering & Opponent Aiming Interpolation Refs
+  const offscreenBoardRef = useRef<HTMLCanvasElement | null>(null);
+  const boardDprRef = useRef<number>(0);
+  const isFirstRoomSnapshotRef = useRef<boolean>(true);
+
+  // Flawlessly smooth 120 FPS interpolated opponent aiming state
+  const targetOpponentAimRef = useRef<{
+    active: boolean;
+    power: number;
+    dirX: number;
+    dirY: number;
+    pullDist: number;
+    pullX: number;
+    pullY: number;
+  }>({
+    active: false,
+    power: 0,
+    dirX: 0,
+    dirY: 1,
+    pullDist: 0,
+    pullX: 0,
+    pullY: 0,
+  });
+
+  const visualOpponentAimRef = useRef<{
+    active: boolean;
+    power: number;
+    dirX: number;
+    dirY: number;
+    pullDist: number;
+    pullX: number;
+    pullY: number;
+  }>({
+    active: false,
+    power: 0,
+    dirX: 0,
+    dirY: 1,
+    pullDist: 0,
+    pullX: 0,
+    pullY: 0,
+  });
+
+  // Activity tracking for idle timer (does NOT reset turn deadline)
   const notifyActivity = useCallback(() => {
     lastActivityTimeRef.current = Date.now();
-    authoritativeDeadlineRef.current = Date.now() + 20000;
-    lastTickedSecondRef.current = -1;
     setIdleSeconds(0);
-    setTurnTimeLeft(20);
   }, []);
 
-  // Refs for 60fps canvas loop
+  // Refs for 120fps canvas loop
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const isTurnInProgressRef = useRef(false);
@@ -1052,19 +1471,23 @@ export default function App() {
   const strikerPocketedInTurnRef = useRef(false);
   const botAimLineRef = useRef<{ startX: number; startY: number; endX: number; endY: number; power: number } | null>(null);
 
-  // Global drag handling tracking refs
+  // Global drag handling tracking refs with strict anti-auto-shoot guarantees
   const dragTrackingRef = useRef<{
     active: boolean;
     touchStartX: number;
     touchStartY: number;
     currentPointerX: number;
     currentPointerY: number;
+    touchStartTime: number;
+    hasDragged: boolean;
   }>({
     active: false,
     touchStartX: 0,
     touchStartY: 0,
     currentPointerX: 0,
     currentPointerY: 0,
+    touchStartTime: 0,
+    hasDragged: false,
   });
 
   // Physics entities
@@ -1370,16 +1793,20 @@ export default function App() {
     setStrikerX(400);
     targetOpponentStrikerXRef.current = 400;
     lastShotSequenceRef.current = 0;
-    authoritativeDeadlineRef.current = Date.now() + 20000;
+    const now = Date.now();
+    authoritativeDeadlineRef.current = now + 20000;
     // At start, 9 white and 9 black on board -> 0 pocketed!
     setPlayerWhitePocketed(0);
     setBotBlackPocketed(0);
     setQueenState('on_board');
-    setCurrentTurn('player');
-    currentTurnRef.current = 'player';
+    const isHost = localRoleRef.current === 'host';
+    const initTurn: 'player' | 'bot' = isHost ? 'player' : 'bot';
+    setCurrentTurn(initTurn);
+    currentTurnRef.current = initTurn;
+    strikerRef.current.y = initTurn === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
     setTurnTimeLeft(20);
     setIdleSeconds(0);
-    lastActivityTimeRef.current = Date.now();
+    lastActivityTimeRef.current = now;
     setIsStrikerMoving(false);
     setIsDraggingStriker(false);
     isTurnInProgressRef.current = false;
@@ -1403,6 +1830,7 @@ export default function App() {
     img.src = '/assets/aistudio/Screenshot_2026-11-08_135550_b3450cc4.png';
     img.onload = () => {
       centerDesignImgRef.current = img;
+      boardDprRef.current = 0; // Invalidate offscreen board cache so center artwork is drawn
     };
   }, []);
 
@@ -1441,6 +1869,10 @@ export default function App() {
       });
     }
 
+    const startTime = Date.now();
+    authoritativeDeadlineRef.current = startTime + 20000;
+    setTurnTimeLeft(20);
+    lastTickedSecondRef.current = -1;
     setActiveRoom(room);
     initializeBoard();
     setScreen('gameplay');
@@ -1715,6 +2147,14 @@ export default function App() {
 
         const isHost = localRoleRef.current === 'host';
 
+        // Fast-forward sequence number on initial room subscription snapshot so historical shots never auto-play
+        if (isFirstRoomSnapshotRef.current) {
+          isFirstRoomSnapshotRef.current = false;
+          if (parsed.lastShot) {
+            lastShotSequenceRef.current = parsed.lastShot.sequenceNumber;
+          }
+        }
+
         // 1. Sync turn deadline
         if (parsed.turnDeadline) {
           authoritativeDeadlineRef.current = parsed.turnDeadline;
@@ -1745,6 +2185,7 @@ export default function App() {
             };
 
             setStrikerX(400);
+            targetOpponentStrikerXRef.current = 400;
             isTurnInProgressRef.current = false;
             setIsStrikerMoving(false);
 
@@ -1838,30 +2279,36 @@ export default function App() {
           }
         }
 
-        // 5. Sync live opponent slider movement & drag aiming in real-time
+        // 5. Sync live opponent slider movement & drag aiming in real-time (Interpolated 120 FPS targets)
         if (parsed.liveAiming && parsed.liveAiming.shooterRole !== localRoleRef.current) {
           const live = parsed.liveAiming;
           const oppStrikerX = isHost ? live.strikerX : 800 - live.strikerX;
           setOpponentStrikerX(oppStrikerX);
           targetOpponentStrikerXRef.current = oppStrikerX;
 
-          // If a shot is already active, or if not dragging, or if stale, deactivate aiming immediately
-          const isStale = live.timestamp ? (Date.now() - live.timestamp > 750) : false;
-          if (isTurnInProgressRef.current || !live.isDragging || isStale) {
-            setOpponentDragForce({
-              active: false,
-              power: 0,
-              dirX: 0,
-              dirY: 1,
-              pullX: 0,
-              pullY: 0,
-              pullDist: 0,
-            });
-          } else {
+          const isAimingActive = Boolean(
+            live.isDragging &&
+            (live.power || 0) > 0.02 &&
+            !isTurnInProgressRef.current &&
+            (!live.timestamp || Date.now() - live.timestamp < 450)
+          );
+
+          if (isAimingActive) {
+            lastOpponentAimTimeRef.current = Date.now();
             const oppDirX = isHost ? live.dirX : -live.dirX;
             const oppDirY = isHost ? live.dirY : -live.dirY;
             const oppPullX = isHost ? live.pullX : -live.pullX;
             const oppPullY = isHost ? live.pullY : -live.pullY;
+
+            targetOpponentAimRef.current = {
+              active: true,
+              power: live.power,
+              dirX: oppDirX,
+              dirY: oppDirY,
+              pullX: oppPullX,
+              pullY: oppPullY,
+              pullDist: live.pullDist,
+            };
 
             setOpponentDragForce({
               active: true,
@@ -1872,8 +2319,32 @@ export default function App() {
               pullY: oppPullY,
               pullDist: live.pullDist,
             });
+          } else {
+            lastOpponentAimTimeRef.current = 0;
+            targetOpponentAimRef.current = {
+              active: false,
+              power: 0,
+              dirX: 0,
+              dirY: 1,
+              pullX: 0,
+              pullY: 0,
+              pullDist: 0,
+            };
+            visualOpponentAimRef.current.active = false;
+            setOpponentDragForce({
+              active: false,
+              power: 0,
+              dirX: 0,
+              dirY: 1,
+              pullX: 0,
+              pullY: 0,
+              pullDist: 0,
+            });
           }
-        } else {
+        } else if (!isTurnInProgressRef.current) {
+          lastOpponentAimTimeRef.current = 0;
+          targetOpponentAimRef.current.active = false;
+          visualOpponentAimRef.current.active = false;
           setOpponentDragForce({
             active: false,
             power: 0,
@@ -1888,34 +2359,44 @@ export default function App() {
         // 6. Sync live physics simulation motion from active shooter in real-time
         if (parsed.livePhysics && parsed.livePhysics.shooterRole !== localRoleRef.current) {
           const phys = parsed.livePhysics;
-          if (phys.striker && !isTurnInProgressRef.current) {
+          if (phys.striker) {
             strikerRef.current.x = isHost ? phys.striker.x : 800 - phys.striker.x;
             strikerRef.current.y = isHost ? phys.striker.y : 800 - phys.striker.y;
             strikerRef.current.vx = isHost ? phys.striker.vx : -phys.striker.vx;
             strikerRef.current.vy = isHost ? phys.striker.vy : -phys.striker.vy;
+            strikerRef.current.isPocketed = false;
+            strikerRef.current.isSinking = false;
+            isTurnInProgressRef.current = true;
+            setIsStrikerMoving(true);
           }
-          if (Array.isArray(phys.coins)) {
+          if (Array.isArray(phys.coins) && phys.coins.length > 0) {
             const currentCoins = coinsRef.current;
             phys.coins.forEach((c) => {
               const match = currentCoins.find((m) => m.id === c.id);
               if (match) {
-                // If coin is pocketed in authoritative state, mark pocketed
-                if (c.isPocketed) {
-                  match.isPocketed = true;
-                  match.isSinking = false;
-                }
+                match.x = isHost ? c.x : 800 - c.x;
+                match.y = isHost ? c.y : 800 - c.y;
+                match.vx = isHost ? c.vx : -c.vx;
+                match.vy = isHost ? c.vy : -c.vy;
+                match.isPocketed = c.isPocketed;
+                if (c.isPocketed) match.isSinking = false;
               }
             });
+            isTurnInProgressRef.current = true;
+            setIsStrikerMoving(true);
           }
         }
 
-        // 7. Process opponent shot (STRICT REALTIME OPPONENT SHOT EXECUTION)
+        // 7. Process opponent shot (STRICT REALTIME OPPONENT SHOT EXECUTION - RULE 1: NEVER AUTO-SHOOT STALE)
         if (parsed.lastShot && parsed.lastShot.sequenceNumber > lastShotSequenceRef.current) {
           const shotSeq = parsed.lastShot.sequenceNumber;
           lastShotSequenceRef.current = shotSeq; // Consume sequence immediately
 
-          // Only simulate motion if this shot was executed by the OPPONENT
-          if (parsed.lastShot.shooterRole !== localRoleRef.current) {
+          const shotAge = Date.now() - (parsed.lastShot.timestamp || 0);
+
+          // Only simulate motion if this shot was executed by the OPPONENT and is fresh (< 3500ms)
+          // RULE 1: Stale shots must never auto-shoot under any condition
+          if (parsed.lastShot.shooterRole !== localRoleRef.current && shotAge < 3500) {
             const shot = parsed.lastShot;
             const startX = isHost ? shot.strikerX : 800 - shot.strikerX;
             const startY = isHost
@@ -1925,6 +2406,9 @@ export default function App() {
             const shotVy = isHost ? shot.vy : -shot.vy;
 
             // Immediately cancel any remaining opponent drag line
+            lastOpponentAimTimeRef.current = 0;
+            targetOpponentAimRef.current.active = false;
+            visualOpponentAimRef.current.active = false;
             setOpponentDragForce({
               active: false,
               power: 0,
@@ -1990,14 +2474,19 @@ export default function App() {
 
     // 0. Smooth 60fps lerp interpolation for opponent's striker slider positioning on baseline (Request 2)
     if (!isTurnInProgressRef.current && currentTurnRef.current === 'bot') {
-      striker.x += (targetOpponentStrikerXRef.current - striker.x) * 0.35;
+      const diff = targetOpponentStrikerXRef.current - striker.x;
+      if (Math.abs(diff) > 0.5) {
+        striker.x += diff * 0.45;
+      } else {
+        striker.x = targetOpponentStrikerXRef.current;
+      }
       striker.y = BOT_BASELINE_Y;
     }
 
     // Broadcast live physics positions during shot motion (Request 1 & Request 2)
     if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && isTurnInProgressRef.current && currentTurnRef.current === 'player') {
       const now = Date.now();
-      if (now - lastLiveBroadcastTimeRef.current > 40) {
+      if (now - lastLiveBroadcastTimeRef.current > 45) {
         lastLiveBroadcastTimeRef.current = now;
         const isHost = localRoleRef.current === 'host';
         const liveCoins = coinsRef.current.map((c) => ({
@@ -2428,9 +2917,12 @@ export default function App() {
 
     setCurrentTurn(nextWho);
     currentTurnRef.current = nextWho;
+    const newDeadline = Date.now() + 20000;
+    authoritativeDeadlineRef.current = newDeadline;
     setTurnTimeLeft(20);
     setIdleSeconds(0);
     lastActivityTimeRef.current = Date.now();
+    lastTickedSecondRef.current = -1;
 
     // ALWAYS reset striker state completely on turn change so striker is 100% available and visible
     const nextBaseY = nextWho === 'player' ? PLAYER_BASELINE_Y : BOT_BASELINE_Y;
@@ -2521,6 +3013,12 @@ export default function App() {
     }
 
     const interval = setInterval(() => {
+      // Pause countdown while striker or coins are in active physical motion
+      if (isStrikerMoving || isTurnInProgressRef.current) {
+        lastTickedSecondRef.current = -1;
+        return;
+      }
+
       const now = Date.now();
       const isMyTurnActive = currentTurnRef.current === 'player';
       const isStrikerStill = !isStrikerMoving && !isTurnInProgressRef.current;
@@ -2539,14 +3037,33 @@ export default function App() {
         lastTickedSecondRef.current = -1;
       }
 
-      // Timeout turn transfer for Host
-      if (remaining <= 0 && currentTurnRef.current === 'player') {
+      // Timeout turn transfer
+      if (remaining <= 0 && isMyTurnActive) {
         soundEngine.playFoul();
         lastTickedSecondRef.current = -1;
         const isHost = localRoleRef.current === 'host';
         const nextTurnRole: 'host' | 'guest' = isHost ? 'guest' : 'host';
         setCurrentTurn('bot');
         currentTurnRef.current = 'bot';
+
+        const ownScore = isHost ? playerWhitePocketed : botBlackPocketed;
+        if (ownScore >= 1) {
+          if (isHost) {
+            setPlayerWhitePocketed((prev) => Math.max(0, prev - 1));
+            returnCoinToCenter('white');
+          } else {
+            setBotBlackPocketed((prev) => Math.max(0, prev - 1));
+            returnCoinToCenter('black');
+          }
+          spawnFloatingScore(400, PLAYER_BASELINE_Y, 'TIMEOUT! -1 FOUL', '#EF4444');
+        } else {
+          spawnFloatingScore(400, PLAYER_BASELINE_Y, 'TIMEOUT! TURN PASSED', '#F59E0B');
+        }
+
+        if (queenState === 'pending_player') {
+          returnCoinToCenter('queen');
+          setQueenState('on_board');
+        }
 
         const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
           id: c.id,
@@ -2562,6 +3079,7 @@ export default function App() {
         authoritativeSequenceRef.current = newSeq;
         const newDeadline = Date.now() + 20000;
         authoritativeDeadlineRef.current = newDeadline;
+        setTurnTimeLeft(20);
 
         const newGameState: AuthoritativeGameState = {
           version: 1,
@@ -2588,7 +3106,7 @@ export default function App() {
           updateRoomGameState(activeRoom.gameId, newGameState, nextTurnRole);
         }
       }
-    }, 1000);
+    }, 250);
 
     return () => {
       clearInterval(interval);
@@ -2627,6 +3145,10 @@ export default function App() {
     const pullY = currentY - s.y;
     const pullDist = Math.hypot(pullX, pullY);
 
+    if (pullDist > 12) {
+      dragTrackingRef.current.hasDragged = true;
+    }
+
     if (pullDist > 4) {
       const clampedPull = Math.min(MAX_DRAG_DIST, pullDist);
       const t = clampedPull / MAX_DRAG_DIST;
@@ -2648,27 +3170,31 @@ export default function App() {
       });
 
       if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
-        const isHost = localRoleRef.current === 'host';
-        const worldStrikerX = isHost ? s.x : 800 - s.x;
-        const worldDirX = isHost ? dirX : -dirX;
-        const worldDirY = isHost ? dirY : -dirY;
-        const worldPullX = isHost ? pullX : -pullX;
-        const worldPullY = isHost ? pullY : -pullY;
+        const now = Date.now();
+        if (now - lastDragBroadcastRef.current >= 35) {
+          lastDragBroadcastRef.current = now;
+          const isHost = localRoleRef.current === 'host';
+          const worldStrikerX = isHost ? s.x : 800 - s.x;
+          const worldDirX = isHost ? dirX : -dirX;
+          const worldDirY = isHost ? dirY : -dirY;
+          const worldPullX = isHost ? pullX : -pullX;
+          const worldPullY = isHost ? pullY : -pullY;
 
-        broadcastLiveStreamState(activeRoom.gameId, {
-          liveAiming: {
-            shooterRole: localRoleRef.current,
-            strikerX: worldStrikerX,
-            isDragging: true,
-            power,
-            dirX: worldDirX,
-            dirY: worldDirY,
-            pullX: worldPullX,
-            pullY: worldPullY,
-            pullDist: clampedPull,
-            timestamp: Date.now(),
-          },
-        });
+          broadcastLiveStreamState(activeRoom.gameId, {
+            liveAiming: {
+              shooterRole: localRoleRef.current,
+              strikerX: worldStrikerX,
+              isDragging: true,
+              power,
+              dirX: worldDirX,
+              dirY: worldDirY,
+              pullX: worldPullX,
+              pullY: worldPullY,
+              pullDist: clampedPull,
+              timestamp: now,
+            },
+          });
+        }
       }
     } else {
       setDragForce({
@@ -2684,20 +3210,25 @@ export default function App() {
         const isHost = localRoleRef.current === 'host';
         const worldStrikerX = isHost ? s.x : 800 - s.x;
 
-        broadcastLiveStreamState(activeRoom.gameId, {
-          liveAiming: {
-            shooterRole: localRoleRef.current,
-            strikerX: worldStrikerX,
-            isDragging: false,
-            power: 0,
-            dirX: 0,
-            dirY: isHost ? -1 : 1,
-            pullX: 0,
-            pullY: 0,
-            pullDist: 0,
-            timestamp: Date.now(),
+        broadcastLiveStreamState(
+          activeRoom.gameId,
+          {
+            liveAiming: {
+              shooterRole: localRoleRef.current,
+              strikerX: worldStrikerX,
+              isDragging: false,
+              power: 0,
+              dirX: 0,
+              dirY: isHost ? -1 : 1,
+              pullX: 0,
+              pullY: 0,
+              pullDist: 0,
+              timestamp: Date.now(),
+            },
+            isReleaseEvent: true,
           },
-        });
+          true
+        );
       }
     }
   }, [matchmakingMode, activeRoom.gameId, notifyActivity]);
@@ -2725,6 +3256,8 @@ export default function App() {
         touchStartY: e.clientY,
         currentPointerX: e.clientX,
         currentPointerY: e.clientY,
+        touchStartTime: Date.now(),
+        hasDragged: false,
       };
 
       setIsDraggingStriker(true);
@@ -2741,10 +3274,68 @@ export default function App() {
       updateDragFromPointer(e.clientX, e.clientY);
     };
 
-    const handleGlobalPointerUp = (e: PointerEvent) => {
+    // Strict pointer cancel handler: never ever shoots!
+    const handleGlobalPointerCancel = () => {
       if (!dragTrackingRef.current.active) return;
       dragTrackingRef.current.active = false;
+      dragTrackingRef.current.hasDragged = false;
       setIsDraggingStriker(false);
+      setDragForce({
+        pullDist: 0,
+        power: 0,
+        dirX: 0,
+        dirY: -1,
+        pullX: 0,
+        pullY: 0,
+      });
+
+      if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+        const isHost = localRoleRef.current === 'host';
+        const worldStrikerX = isHost ? strikerRef.current.x : 800 - strikerRef.current.x;
+        broadcastLiveStreamState(
+          activeRoom.gameId,
+          {
+            liveAiming: {
+              shooterRole: localRoleRef.current,
+              strikerX: worldStrikerX,
+              isDragging: false,
+              power: 0,
+              dirX: 0,
+              dirY: isHost ? -1 : 1,
+              pullX: 0,
+              pullY: 0,
+              pullDist: 0,
+              timestamp: Date.now(),
+            },
+            isReleaseEvent: true,
+          },
+          true
+        );
+      }
+    };
+
+    const handleGlobalPointerUp = (e: PointerEvent) => {
+      if (!dragTrackingRef.current.active) return;
+      const wasActive = dragTrackingRef.current.active;
+      const hadDragged = dragTrackingRef.current.hasDragged;
+      dragTrackingRef.current.active = false;
+      dragTrackingRef.current.hasDragged = false;
+      setIsDraggingStriker(false);
+
+      if (!wasActive) return;
+
+      // RULE 1: THE STRIKER SHOULD NEVER EVER AUTOMATICALLY SHOOT AT ANY CONDITION
+      if (currentTurnRef.current !== 'player' || isStrikerMoving || isTurnInProgressRef.current) {
+        setDragForce({
+          pullDist: 0,
+          power: 0,
+          dirX: 0,
+          dirY: -1,
+          pullX: 0,
+          pullY: 0,
+        });
+        return;
+      }
 
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -2759,90 +3350,112 @@ export default function App() {
       const pullY = currentY - s.y;
       const pullDist = Math.hypot(pullX, pullY);
 
-      // Require at least 18px of intentional backward drag to release a shot (prevents accidental taps/clicks)
-      if (pullDist >= 18) {
+      // Strict intentional shot release criteria:
+      // - Pointer was actively dragged (hadDragged === true)
+      // - Substantial pullback distance (pullDist >= 26)
+      // - Pulling backward toward player baseline (pullY >= 4)
+      const isIntentionalShot =
+        hadDragged &&
+        pullDist >= 26 &&
+        pullY >= 4;
+
+      if (isIntentionalShot) {
         const clampedPull = Math.min(MAX_DRAG_DIST, pullDist);
         const t = clampedPull / MAX_DRAG_DIST;
         const power = Math.pow(t, 1.35);
-        const impulseSpeed = power * MAX_STRIKE_VELOCITY;
 
-        const pullAngle = Math.atan2(pullY, pullX);
-        const shotAngle = pullAngle + Math.PI;
+        if (power >= 0.08) {
+          const impulseSpeed = power * MAX_STRIKE_VELOCITY;
+          const pullAngle = Math.atan2(pullY, pullX);
+          const shotAngle = pullAngle + Math.PI;
 
-        isTurnInProgressRef.current = true;
-        setIsStrikerMoving(true);
-        shotStartTimeRef.current = Date.now();
+          isTurnInProgressRef.current = true;
+          setIsStrikerMoving(true);
+          shotStartTimeRef.current = Date.now();
 
-        strikerRef.current.vx = Math.cos(shotAngle) * impulseSpeed;
-        strikerRef.current.vy = Math.sin(shotAngle) * impulseSpeed;
+          strikerRef.current.vx = Math.cos(shotAngle) * impulseSpeed;
+          strikerRef.current.vy = Math.sin(shotAngle) * impulseSpeed;
 
-        soundEngine.playStrikerHit(power);
+          soundEngine.playStrikerHit(power);
 
-        // Broadcast shot to Firestore for real-time 2-player multiplayer
-        if (activeRoom.gameId && screen === 'gameplay') {
-          const isHost = localRoleRef.current === 'host';
-          const shooterRole: 'host' | 'guest' = localRoleRef.current;
-          const newShotSeq = (lastShotSequenceRef.current || 0) + 1;
-          lastShotSequenceRef.current = newShotSeq;
+          // Broadcast shot to Firestore for real-time 2-player multiplayer
+          if (activeRoom.gameId && screen === 'gameplay') {
+            const isHost = localRoleRef.current === 'host';
+            const shooterRole: 'host' | 'guest' = localRoleRef.current;
+            const newShotSeq = (lastShotSequenceRef.current || 0) + 1;
+            lastShotSequenceRef.current = newShotSeq;
 
-          const worldStrikerX = isHost ? s.x : 800 - s.x;
-          const worldStrikerY = isHost ? s.y : 800 - s.y;
-          const worldVx = isHost ? strikerRef.current.vx : -strikerRef.current.vx;
-          const worldVy = isHost ? strikerRef.current.vy : -strikerRef.current.vy;
+            const worldStrikerX = isHost ? s.x : 800 - s.x;
+            const worldStrikerY = isHost ? s.y : 800 - s.y;
+            const worldVx = isHost ? strikerRef.current.vx : -strikerRef.current.vx;
+            const worldVy = isHost ? strikerRef.current.vy : -strikerRef.current.vy;
 
-          const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
-            id: c.id,
-            type: c.type,
-            x: Math.round((isHost ? c.x : 800 - c.x) * 100) / 100,
-            y: Math.round((isHost ? c.y : 800 - c.y) * 100) / 100,
-            vx: Math.round((isHost ? c.vx : -c.vx) * 100) / 100,
-            vy: Math.round((isHost ? c.vy : -c.vy) * 100) / 100,
-            isPocketed: c.isPocketed,
-          }));
+            const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
+              id: c.id,
+              type: c.type,
+              x: Math.round((isHost ? c.x : 800 - c.x) * 100) / 100,
+              y: Math.round((isHost ? c.y : 800 - c.y) * 100) / 100,
+              vx: Math.round((isHost ? c.vx : -c.vx) * 100) / 100,
+              vy: Math.round((isHost ? c.vy : -c.vy) * 100) / 100,
+              isPocketed: c.isPocketed,
+            }));
 
-          const lastShotObj: AuthoritativeShot = {
-            shooterName: playerName,
-            shooterRole,
-            strikerX: worldStrikerX,
-            strikerY: worldStrikerY,
-            vx: worldVx,
-            vy: worldVy,
-            coins: authCoins,
-            power,
-            timestamp: Date.now(),
-            sequenceNumber: newShotSeq,
-          };
-
-          const currentSeq = (authoritativeSequenceRef.current || 0) + 1;
-          authoritativeSequenceRef.current = currentSeq;
-
-          const hostScore = isHost ? playerWhitePocketed : botBlackPocketed;
-          const guestScore = isHost ? botBlackPocketed : playerWhitePocketed;
-
-          const now = Date.now();
-          const gameStateWithShot: AuthoritativeGameState = {
-            version: 1,
-            sequenceNumber: currentSeq,
-            gameStatus: 'playing',
-            currentTurn: shooterRole,
-            turnStartedAt: now,
-            turnDeadline: now + 20000,
-            turnDuration: 20,
-            hostScore,
-            guestScore,
-            queenState: toAuthoritativeQueenState(queenState, isHost),
-            coins: authCoins,
-            striker: {
-              x: worldStrikerX,
-              y: worldStrikerY,
+            const lastShotObj: AuthoritativeShot = {
+              shooterName: playerName,
+              shooterRole,
+              strikerX: worldStrikerX,
+              strikerY: worldStrikerY,
               vx: worldVx,
               vy: worldVy,
-              isPocketed: false,
-            },
-            lastShot: lastShotObj,
-          };
+              coins: authCoins,
+              power,
+              timestamp: Date.now(),
+              sequenceNumber: newShotSeq,
+            };
 
-          updateRoomGameState(activeRoom.gameId, gameStateWithShot);
+            const currentSeq = (authoritativeSequenceRef.current || 0) + 1;
+            authoritativeSequenceRef.current = currentSeq;
+
+            const hostScore = isHost ? playerWhitePocketed : botBlackPocketed;
+            const guestScore = isHost ? botBlackPocketed : playerWhitePocketed;
+
+            const now = Date.now();
+            const gameStateWithShot: AuthoritativeGameState = {
+              version: 1,
+              sequenceNumber: currentSeq,
+              gameStatus: 'playing',
+              currentTurn: shooterRole,
+              turnStartedAt: now,
+              turnDeadline: now + 20000,
+              turnDuration: 20,
+              hostScore,
+              guestScore,
+              queenState: toAuthoritativeQueenState(queenState, isHost),
+              coins: authCoins,
+              striker: {
+                x: worldStrikerX,
+                y: worldStrikerY,
+                vx: worldVx,
+                vy: worldVy,
+                isPocketed: false,
+              },
+              lastShot: lastShotObj,
+              liveAiming: {
+                shooterRole,
+                strikerX: worldStrikerX,
+                isDragging: false,
+                power: 0,
+                dirX: 0,
+                dirY: isHost ? -1 : 1,
+                pullX: 0,
+                pullY: 0,
+                pullDist: 0,
+                timestamp: now,
+              },
+            };
+
+            updateRoomGameState(activeRoom.gameId, gameStateWithShot);
+          }
         }
       }
 
@@ -2854,16 +3467,41 @@ export default function App() {
         pullX: 0,
         pullY: 0,
       });
+
+      // If no intentional shot was released, immediately clear aiming on opponent's screen
+      if (!isIntentionalShot && matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+        const isHost = localRoleRef.current === 'host';
+        const worldStrikerX = isHost ? s.x : 800 - s.x;
+        broadcastLiveStreamState(
+          activeRoom.gameId,
+          {
+            liveAiming: {
+              shooterRole: localRoleRef.current,
+              strikerX: worldStrikerX,
+              isDragging: false,
+              power: 0,
+              dirX: 0,
+              dirY: isHost ? -1 : 1,
+              pullX: 0,
+              pullY: 0,
+              pullDist: 0,
+              timestamp: Date.now(),
+            },
+            isReleaseEvent: true,
+          },
+          true
+        );
+      }
     };
 
     window.addEventListener('pointermove', handleGlobalPointerMove);
     window.addEventListener('pointerup', handleGlobalPointerUp);
-    window.addEventListener('pointercancel', handleGlobalPointerUp);
+    window.addEventListener('pointercancel', handleGlobalPointerCancel);
 
     return () => {
       window.removeEventListener('pointermove', handleGlobalPointerMove);
       window.removeEventListener('pointerup', handleGlobalPointerUp);
-      window.removeEventListener('pointercancel', handleGlobalPointerUp);
+      window.removeEventListener('pointercancel', handleGlobalPointerCancel);
     };
   }, [updateDragFromPointer]);
 
@@ -2877,22 +3515,26 @@ export default function App() {
     strikerRef.current.y = PLAYER_BASELINE_Y;
 
     if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
-      const isHost = localRoleRef.current === 'host';
-      const worldStrikerX = isHost ? newX : 800 - newX;
-      broadcastLiveStreamState(activeRoom.gameId, {
-        liveAiming: {
-          shooterRole: localRoleRef.current,
-          strikerX: worldStrikerX,
-          isDragging: false,
-          power: 0,
-          dirX: 0,
-          dirY: isHost ? -1 : 1,
-          pullX: 0,
-          pullY: 0,
-          pullDist: 0,
-          timestamp: Date.now(),
-        },
-      });
+      const now = Date.now();
+      if (now - lastSliderBroadcastRef.current >= 45) {
+        lastSliderBroadcastRef.current = now;
+        const isHost = localRoleRef.current === 'host';
+        const worldStrikerX = isHost ? newX : 800 - newX;
+        broadcastLiveStreamState(activeRoom.gameId, {
+          liveAiming: {
+            shooterRole: localRoleRef.current,
+            strikerX: worldStrikerX,
+            isDragging: false,
+            power: 0,
+            dirX: 0,
+            dirY: isHost ? -1 : 1,
+            pullX: 0,
+            pullY: 0,
+            pullDist: 0,
+            timestamp: now,
+          },
+        });
+      }
     }
   };
 
@@ -3752,7 +4394,19 @@ export default function App() {
       }
 
       // OPPONENT AIM TRAJECTORY WITH EXACTLY 4 WHITE DOTS (Real-time live multiplayer)
-      if (opponentDragForce.active && opponentDragForce.power > 0.02 && currentTurnRef.current === 'bot' && !isStrikerMoving) {
+      const isOpponentAimFresh = opponentDragForce.active && (Date.now() - (lastOpponentAimTimeRef.current || 0) < 400);
+      if (opponentDragForce.active && !isOpponentAimFresh) {
+        setOpponentDragForce({
+          active: false,
+          power: 0,
+          dirX: 0,
+          dirY: 1,
+          pullX: 0,
+          pullY: 0,
+          pullDist: 0,
+        });
+      }
+      if (isOpponentAimFresh && opponentDragForce.power > 0.02 && currentTurnRef.current === 'bot' && !isStrikerMoving) {
         ctx.save();
 
         const oppStriker = strikerRef.current;
@@ -3976,8 +4630,20 @@ export default function App() {
       <div className="relative z-10 w-full max-w-[460px] mx-auto px-4 pt-3 pb-1 flex items-center justify-between">
         {/* Left: Opponent Avatar Card with Opponent Name & Queen Indicator */}
         <div className="flex flex-col items-start gap-1 relative">
-          <div className="w-12 h-12 rounded-lg bg-[#2768A3] border-2 border-[#5497D7] flex items-center justify-center shadow-md overflow-hidden relative">
+          <div
+            className={`w-12 h-12 rounded-lg bg-[#2768A3] border-2 flex items-center justify-center shadow-md overflow-hidden relative transition-all ${
+              currentTurn === 'bot'
+                ? 'border-amber-400 ring-2 ring-amber-400/80 shadow-lg shadow-amber-500/30'
+                : 'border-[#5497D7]'
+            }`}
+          >
             <User className="w-8 h-8 text-neutral-200 fill-neutral-200" />
+            {/* Turn countdown badge on opponent card */}
+            {currentTurn === 'bot' && !isStrikerMoving && (
+              <div className="absolute top-0 right-0 bg-neutral-950/85 text-amber-300 border-b border-l border-amber-500/80 text-[10px] font-black rounded-bl px-1 py-0.5 tabular-nums leading-none shadow">
+                {turnTimeLeft}s
+              </div>
+            )}
             {/* Rule 8: Red Queen Indicator on Scoreboard for Opponent */}
             {queenState === 'pending_bot' && (
               <div className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-red-600 border border-white animate-ping" />
@@ -4043,6 +4709,12 @@ export default function App() {
             }`}
           >
             <User className="w-8 h-8 text-neutral-100 fill-neutral-100" />
+            {/* Turn countdown badge on player card */}
+            {currentTurn === 'player' && !isStrikerMoving && (
+              <div className="absolute top-0 right-0 bg-neutral-950/85 text-emerald-300 border-b border-l border-emerald-500/80 text-[10px] font-black rounded-bl px-1 py-0.5 tabular-nums leading-none shadow">
+                {turnTimeLeft}s
+              </div>
+            )}
             {/* Rule 8: Red Queen Indicator on Scoreboard for Player */}
             {queenState === 'pending_player' && (
               <div className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-red-600 border border-white animate-ping" />

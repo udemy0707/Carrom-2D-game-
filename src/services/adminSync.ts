@@ -1054,7 +1054,11 @@ export async function updateRoomGameState(
 
 let lastFirestoreStreamTime = 0;
 
-export function broadcastLiveStreamState(roomId: string, patchState: Partial<AuthoritativeGameState>): void {
+export function broadcastLiveStreamState(
+  roomId: string,
+  patchState: Partial<AuthoritativeGameState> & { isReleaseEvent?: boolean },
+  isReleaseEventParam?: boolean
+): void {
   const currentLocal = getLocalRoom(roomId) || {
     roomId,
     roomCode: roomId,
@@ -1082,7 +1086,8 @@ export function broadcastLiveStreamState(roomId: string, patchState: Partial<Aut
     existingGameState = {} as any;
   }
 
-  const updatedGameState = { ...existingGameState, ...patchState };
+  const { isReleaseEvent, ...cleanPatch } = patchState;
+  const updatedGameState = { ...existingGameState, ...cleanPatch };
   const updatedPayload: ServerGameRoom = {
     ...currentLocal,
     gameState: JSON.stringify(updatedGameState),
@@ -1091,10 +1096,15 @@ export function broadcastLiveStreamState(roomId: string, patchState: Partial<Aut
 
   saveLocalRoom(updatedPayload);
 
-  // If drag was released (isDragging === false), flush immediately so opponent never sees ghost drag
-  const isRelease = patchState.liveAiming && !patchState.liveAiming.isDragging;
+  // If drag was released (explicit release event or transition from dragging to not dragging), flush immediately
+  const isRelease = Boolean(
+    isReleaseEvent ||
+    isReleaseEventParam ||
+    (patchState.liveAiming && !patchState.liveAiming.isDragging && existingGameState.liveAiming?.isDragging)
+  );
+  
   const now = Date.now();
-  if (isRelease || now - lastFirestoreStreamTime > 100) {
+  if (isRelease || now - lastFirestoreStreamTime > 60) {
     lastFirestoreStreamTime = now;
     try {
       const docRef = doc(db, 'game_rooms', roomId);
