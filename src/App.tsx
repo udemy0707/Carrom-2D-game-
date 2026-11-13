@@ -1030,20 +1030,18 @@ export default function App() {
   const authoritativeDeadlineRef = useRef<number>(Date.now() + 20000);
   const lastShotSequenceRef = useRef<number>(0);
   const shotStartTimeRef = useRef<number>(0);
+  const targetOpponentStrikerXRef = useRef<number>(400);
+  const lastSliderBroadcastRef = useRef<number>(0);
+  const lastDragBroadcastRef = useRef<number>(0);
 
-  // Reset countdown timer & turn deadline upon player response or movement
+  // Reset countdown timer & turn deadline upon player response or movement (Request 1)
   const notifyActivity = useCallback(() => {
-    const newDeadline = Date.now() + 20000;
     lastActivityTimeRef.current = Date.now();
-    authoritativeDeadlineRef.current = newDeadline;
+    authoritativeDeadlineRef.current = Date.now() + 20000;
     lastTickedSecondRef.current = -1;
     setIdleSeconds(0);
     setTurnTimeLeft(20);
-
-    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && currentTurnRef.current === 'player') {
-      updateRoomGameState(activeRoom.gameId, { turnDeadline: newDeadline });
-    }
-  }, [matchmakingMode, activeRoom.gameId]);
+  }, []);
 
   // Refs for 60fps canvas loop
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1370,6 +1368,9 @@ export default function App() {
     };
 
     setStrikerX(400);
+    targetOpponentStrikerXRef.current = 400;
+    lastShotSequenceRef.current = 0;
+    authoritativeDeadlineRef.current = Date.now() + 20000;
     // At start, 9 white and 9 black on board -> 0 pocketed!
     setPlayerWhitePocketed(0);
     setBotBlackPocketed(0);
@@ -1759,10 +1760,10 @@ export default function App() {
             parsed.coins.forEach((authCoin) => {
               const match = currentCoins.find((c) => c.id === authCoin.id);
               if (match) {
-                match.x = authCoin.x;
-                match.y = authCoin.y;
-                match.vx = authCoin.vx;
-                match.vy = authCoin.vy;
+                match.x = isHost ? authCoin.x : 800 - authCoin.x;
+                match.y = isHost ? authCoin.y : 800 - authCoin.y;
+                match.vx = isHost ? authCoin.vx : -authCoin.vx;
+                match.vy = isHost ? authCoin.vy : -authCoin.vy;
                 match.isPocketed = authCoin.isPocketed;
                 if (authCoin.isPocketed) match.isSinking = false;
               }
@@ -1837,21 +1838,16 @@ export default function App() {
           }
         }
 
-        // 5. Sync live opponent slider movement & drag aiming in real-time (Request 1 & 4)
+        // 5. Sync live opponent slider movement & drag aiming in real-time
         if (parsed.liveAiming && parsed.liveAiming.shooterRole !== localRoleRef.current) {
           const live = parsed.liveAiming;
-          setOpponentStrikerX(live.strikerX);
-          if (live.isDragging) {
-            setOpponentDragForce({
-              active: true,
-              power: live.power,
-              dirX: live.dirX,
-              dirY: -live.dirY,
-              pullX: live.pullX,
-              pullY: -live.pullY,
-              pullDist: live.pullDist,
-            });
-          } else {
+          const oppStrikerX = isHost ? live.strikerX : 800 - live.strikerX;
+          setOpponentStrikerX(oppStrikerX);
+          targetOpponentStrikerXRef.current = oppStrikerX;
+
+          // If a shot is already active, or if not dragging, or if stale, deactivate aiming immediately
+          const isStale = live.timestamp ? (Date.now() - live.timestamp > 750) : false;
+          if (isTurnInProgressRef.current || !live.isDragging || isStale) {
             setOpponentDragForce({
               active: false,
               power: 0,
@@ -1861,34 +1857,59 @@ export default function App() {
               pullY: 0,
               pullDist: 0,
             });
+          } else {
+            const oppDirX = isHost ? live.dirX : -live.dirX;
+            const oppDirY = isHost ? live.dirY : -live.dirY;
+            const oppPullX = isHost ? live.pullX : -live.pullX;
+            const oppPullY = isHost ? live.pullY : -live.pullY;
+
+            setOpponentDragForce({
+              active: true,
+              power: live.power,
+              dirX: oppDirX,
+              dirY: oppDirY,
+              pullX: oppPullX,
+              pullY: oppPullY,
+              pullDist: live.pullDist,
+            });
           }
+        } else {
+          setOpponentDragForce({
+            active: false,
+            power: 0,
+            dirX: 0,
+            dirY: 1,
+            pullX: 0,
+            pullY: 0,
+            pullDist: 0,
+          });
         }
 
-        // 6. Sync live physics simulation motion from active shooter in real-time (Request 1)
+        // 6. Sync live physics simulation motion from active shooter in real-time
         if (parsed.livePhysics && parsed.livePhysics.shooterRole !== localRoleRef.current) {
           const phys = parsed.livePhysics;
-          if (phys.striker) {
-            strikerRef.current.x = phys.striker.x;
-            strikerRef.current.y = phys.shooterRole === 'guest' ? BOT_BASELINE_Y : PLAYER_BASELINE_Y;
-            strikerRef.current.vx = phys.striker.vx;
-            strikerRef.current.vy = phys.striker.vy;
+          if (phys.striker && !isTurnInProgressRef.current) {
+            strikerRef.current.x = isHost ? phys.striker.x : 800 - phys.striker.x;
+            strikerRef.current.y = isHost ? phys.striker.y : 800 - phys.striker.y;
+            strikerRef.current.vx = isHost ? phys.striker.vx : -phys.striker.vx;
+            strikerRef.current.vy = isHost ? phys.striker.vy : -phys.striker.vy;
           }
           if (Array.isArray(phys.coins)) {
             const currentCoins = coinsRef.current;
             phys.coins.forEach((c) => {
               const match = currentCoins.find((m) => m.id === c.id);
               if (match) {
-                match.x = c.x;
-                match.y = c.y;
-                match.vx = c.vx;
-                match.vy = c.vy;
-                match.isPocketed = c.isPocketed;
+                // If coin is pocketed in authoritative state, mark pocketed
+                if (c.isPocketed) {
+                  match.isPocketed = true;
+                  match.isSinking = false;
+                }
               }
             });
           }
         }
 
-        // 7. Process opponent shot (STRICT STALE SHOT & REPLAY PREVENTION)
+        // 7. Process opponent shot (STRICT REALTIME OPPONENT SHOT EXECUTION)
         if (parsed.lastShot && parsed.lastShot.sequenceNumber > lastShotSequenceRef.current) {
           const shotSeq = parsed.lastShot.sequenceNumber;
           lastShotSequenceRef.current = shotSeq; // Consume sequence immediately
@@ -1896,11 +1917,50 @@ export default function App() {
           // Only simulate motion if this shot was executed by the OPPONENT
           if (parsed.lastShot.shooterRole !== localRoleRef.current) {
             const shot = parsed.lastShot;
+            const startX = isHost ? shot.strikerX : 800 - shot.strikerX;
+            const startY = isHost
+              ? (shot.strikerY ?? BOT_BASELINE_Y)
+              : 800 - (shot.strikerY ?? (800 - BOT_BASELINE_Y));
+            const shotVx = isHost ? shot.vx : -shot.vx;
+            const shotVy = isHost ? shot.vy : -shot.vy;
+
+            // Immediately cancel any remaining opponent drag line
+            setOpponentDragForce({
+              active: false,
+              power: 0,
+              dirX: 0,
+              dirY: 1,
+              pullX: 0,
+              pullY: 0,
+              pullDist: 0,
+            });
+
+            // Sync coins to pre-shot positions if included
+            if (Array.isArray(shot.coins) && shot.coins.length > 0) {
+              const currentCoins = coinsRef.current;
+              shot.coins.forEach((authCoin) => {
+                const match = currentCoins.find((c) => c.id === authCoin.id);
+                if (match) {
+                  match.x = isHost ? authCoin.x : 800 - authCoin.x;
+                  match.y = isHost ? authCoin.y : 800 - authCoin.y;
+                  match.vx = isHost ? authCoin.vx : -authCoin.vx;
+                  match.vy = isHost ? authCoin.vy : -authCoin.vy;
+                  match.isPocketed = authCoin.isPocketed;
+                  if (authCoin.isPocketed) match.isSinking = false;
+                }
+              });
+            }
+
             const s = strikerRef.current;
-            s.x = shot.strikerX;
-            s.y = shot.shooterRole === 'guest' ? BOT_BASELINE_Y : PLAYER_BASELINE_Y;
-            s.vx = shot.vx;
-            s.vy = shot.vy;
+            s.x = startX;
+            s.y = startY;
+            s.vx = shotVx;
+            s.vy = shotVy;
+            s.isPocketed = false;
+            s.isSinking = false;
+            s.sinkScale = 1;
+
+            shotStartTimeRef.current = Date.now();
             isTurnInProgressRef.current = true;
             setIsStrikerMoving(true);
             soundEngine.playStrikerHit(shot.power || 0.8);
@@ -1928,27 +1988,35 @@ export default function App() {
     const striker = strikerRef.current;
     const allDiscs = [striker, ...coins].filter((c) => !c.isPocketed);
 
-    // Broadcast live physics positions during shot motion (Request 1)
-    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && isTurnInProgressRef.current) {
+    // 0. Smooth 60fps lerp interpolation for opponent's striker slider positioning on baseline (Request 2)
+    if (!isTurnInProgressRef.current && currentTurnRef.current === 'bot') {
+      striker.x += (targetOpponentStrikerXRef.current - striker.x) * 0.35;
+      striker.y = BOT_BASELINE_Y;
+    }
+
+    // Broadcast live physics positions during shot motion (Request 1 & Request 2)
+    if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && isTurnInProgressRef.current && currentTurnRef.current === 'player') {
       const now = Date.now();
-      if (now - lastLiveBroadcastTimeRef.current > 60) {
+      if (now - lastLiveBroadcastTimeRef.current > 40) {
         lastLiveBroadcastTimeRef.current = now;
+        const isHost = localRoleRef.current === 'host';
         const liveCoins = coinsRef.current.map((c) => ({
           id: c.id,
-          x: Math.round(c.x * 10) / 10,
-          y: Math.round(c.y * 10) / 10,
-          vx: Math.round(c.vx * 10) / 10,
-          vy: Math.round(c.vy * 10) / 10,
+          x: Math.round((isHost ? c.x : 800 - c.x) * 10) / 10,
+          y: Math.round((isHost ? c.y : 800 - c.y) * 10) / 10,
+          vx: Math.round((isHost ? c.vx : -c.vx) * 10) / 10,
+          vy: Math.round((isHost ? c.vy : -c.vy) * 10) / 10,
           isPocketed: c.isPocketed,
         }));
+        const s = strikerRef.current;
         broadcastLiveStreamState(activeRoom.gameId, {
           livePhysics: {
             shooterRole: localRoleRef.current,
             striker: {
-              x: Math.round(strikerRef.current.x * 10) / 10,
-              y: Math.round(strikerRef.current.y * 10) / 10,
-              vx: Math.round(strikerRef.current.vx * 10) / 10,
-              vy: Math.round(strikerRef.current.vy * 10) / 10,
+              x: Math.round((isHost ? s.x : 800 - s.x) * 10) / 10,
+              y: Math.round((isHost ? s.y : 800 - s.y) * 10) / 10,
+              vx: Math.round((isHost ? s.vx : -s.vx) * 10) / 10,
+              vy: Math.round((isHost ? s.vy : -s.vy) * 10) / 10,
             },
             coins: liveCoins,
             timestamp: now,
@@ -2027,14 +2095,15 @@ export default function App() {
         }
       }
 
-      // STRICT NATURAL CARROM NET HOLE POCKET DETECTION (Requirement 1)
-      // A coin is captured strictly when the edge of the nethole has crossed >50% of the coin's total size (dist < POCKET_HOLE_RADIUS)
+      // STRICT NATURAL CARROM NET HOLE POCKET DETECTION (Requirement 1 & Request 3)
+      // A coin is captured strictly when >50% of the coin's total size has crossed the edge of the nethole (dist < POCKET_HOLE_RADIUS)
       for (const pocket of POCKETS) {
         const dist = Math.hypot(d.x - pocket.x, d.y - pocket.y);
         if (dist < POCKET_HOLE_RADIUS && !d.isSinking) {
           d.isSinking = true;
-          d.vx = (pocket.x - d.x) * 0.18;
-          d.vy = (pocket.y - d.y) * 0.18;
+          // Retain natural momentum while being smoothly pulled into the net hole center
+          d.vx = d.vx * 0.45 + (pocket.x - d.x) * 0.14;
+          d.vy = d.vy * 0.45 + (pocket.y - d.y) * 0.14;
           break;
         }
       }
@@ -2143,6 +2212,12 @@ export default function App() {
         d.spinVel = 0;
         d.isSinking = false;
       });
+    }
+
+    // Guard: A shot in flight must run for at least 400ms before checking for settlement (prevents premature aborts)
+    if (isTurnInProgressRef.current && shotElapsed < 400) {
+      setIsStrikerMoving(true);
+      return;
     }
 
     const moving = allDiscs.some(
@@ -2400,10 +2475,10 @@ export default function App() {
       const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
         id: c.id,
         type: c.type,
-        x: Math.round(c.x * 100) / 100,
-        y: Math.round(c.y * 100) / 100,
-        vx: Math.round(c.vx * 100) / 100,
-        vy: Math.round(c.vy * 100) / 100,
+        x: Math.round((isHost ? c.x : 800 - c.x) * 100) / 100,
+        y: Math.round((isHost ? c.y : 800 - c.y) * 100) / 100,
+        vx: Math.round((isHost ? c.vx : -c.vx) * 100) / 100,
+        vy: Math.round((isHost ? c.vy : -c.vy) * 100) / 100,
         isPocketed: c.isPocketed,
       }));
 
@@ -2420,8 +2495,8 @@ export default function App() {
         queenState: toAuthoritativeQueenState(queenState, isHost),
         coins: authCoins,
         striker: {
-          x: strikerRef.current.x,
-          y: strikerRef.current.y,
+          x: isHost ? strikerRef.current.x : 800 - strikerRef.current.x,
+          y: isHost ? strikerRef.current.y : 800 - strikerRef.current.y,
           vx: 0,
           vy: 0,
           isPocketed: false,
@@ -2476,10 +2551,10 @@ export default function App() {
         const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
           id: c.id,
           type: c.type,
-          x: Math.round(c.x * 100) / 100,
-          y: Math.round(c.y * 100) / 100,
-          vx: Math.round(c.vx * 100) / 100,
-          vy: Math.round(c.vy * 100) / 100,
+          x: Math.round((isHost ? c.x : 800 - c.x) * 100) / 100,
+          y: Math.round((isHost ? c.y : 800 - c.y) * 100) / 100,
+          vx: 0,
+          vy: 0,
           isPocketed: c.isPocketed,
         }));
 
@@ -2573,16 +2648,23 @@ export default function App() {
       });
 
       if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+        const isHost = localRoleRef.current === 'host';
+        const worldStrikerX = isHost ? s.x : 800 - s.x;
+        const worldDirX = isHost ? dirX : -dirX;
+        const worldDirY = isHost ? dirY : -dirY;
+        const worldPullX = isHost ? pullX : -pullX;
+        const worldPullY = isHost ? pullY : -pullY;
+
         broadcastLiveStreamState(activeRoom.gameId, {
           liveAiming: {
             shooterRole: localRoleRef.current,
-            strikerX: s.x,
+            strikerX: worldStrikerX,
             isDragging: true,
             power,
-            dirX,
-            dirY,
-            pullX,
-            pullY,
+            dirX: worldDirX,
+            dirY: worldDirY,
+            pullX: worldPullX,
+            pullY: worldPullY,
             pullDist: clampedPull,
             timestamp: Date.now(),
           },
@@ -2599,14 +2681,17 @@ export default function App() {
       });
 
       if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+        const isHost = localRoleRef.current === 'host';
+        const worldStrikerX = isHost ? s.x : 800 - s.x;
+
         broadcastLiveStreamState(activeRoom.gameId, {
           liveAiming: {
             shooterRole: localRoleRef.current,
-            strikerX: s.x,
+            strikerX: worldStrikerX,
             isDragging: false,
             power: 0,
             dirX: 0,
-            dirY: -1,
+            dirY: isHost ? -1 : 1,
             pullX: 0,
             pullY: 0,
             pullDist: 0,
@@ -2700,12 +2785,29 @@ export default function App() {
           const newShotSeq = (lastShotSequenceRef.current || 0) + 1;
           lastShotSequenceRef.current = newShotSeq;
 
+          const worldStrikerX = isHost ? s.x : 800 - s.x;
+          const worldStrikerY = isHost ? s.y : 800 - s.y;
+          const worldVx = isHost ? strikerRef.current.vx : -strikerRef.current.vx;
+          const worldVy = isHost ? strikerRef.current.vy : -strikerRef.current.vy;
+
+          const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
+            id: c.id,
+            type: c.type,
+            x: Math.round((isHost ? c.x : 800 - c.x) * 100) / 100,
+            y: Math.round((isHost ? c.y : 800 - c.y) * 100) / 100,
+            vx: Math.round((isHost ? c.vx : -c.vx) * 100) / 100,
+            vy: Math.round((isHost ? c.vy : -c.vy) * 100) / 100,
+            isPocketed: c.isPocketed,
+          }));
+
           const lastShotObj: AuthoritativeShot = {
             shooterName: playerName,
             shooterRole,
-            strikerX: s.x,
-            vx: strikerRef.current.vx,
-            vy: strikerRef.current.vy,
+            strikerX: worldStrikerX,
+            strikerY: worldStrikerY,
+            vx: worldVx,
+            vy: worldVy,
+            coins: authCoins,
             power,
             timestamp: Date.now(),
             sequenceNumber: newShotSeq,
@@ -2713,16 +2815,6 @@ export default function App() {
 
           const currentSeq = (authoritativeSequenceRef.current || 0) + 1;
           authoritativeSequenceRef.current = currentSeq;
-
-          const authCoins: AuthoritativeCoin[] = coinsRef.current.map((c) => ({
-            id: c.id,
-            type: c.type,
-            x: Math.round(c.x * 100) / 100,
-            y: Math.round(c.y * 100) / 100,
-            vx: Math.round(c.vx * 100) / 100,
-            vy: Math.round(c.vy * 100) / 100,
-            isPocketed: c.isPocketed,
-          }));
 
           const hostScore = isHost ? playerWhitePocketed : botBlackPocketed;
           const guestScore = isHost ? botBlackPocketed : playerWhitePocketed;
@@ -2741,10 +2833,10 @@ export default function App() {
             queenState: toAuthoritativeQueenState(queenState, isHost),
             coins: authCoins,
             striker: {
-              x: s.x,
-              y: s.y,
-              vx: strikerRef.current.vx,
-              vy: strikerRef.current.vy,
+              x: worldStrikerX,
+              y: worldStrikerY,
+              vx: worldVx,
+              vy: worldVy,
               isPocketed: false,
             },
             lastShot: lastShotObj,
@@ -2785,14 +2877,16 @@ export default function App() {
     strikerRef.current.y = PLAYER_BASELINE_Y;
 
     if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
+      const isHost = localRoleRef.current === 'host';
+      const worldStrikerX = isHost ? newX : 800 - newX;
       broadcastLiveStreamState(activeRoom.gameId, {
         liveAiming: {
           shooterRole: localRoleRef.current,
-          strikerX: newX,
+          strikerX: worldStrikerX,
           isDragging: false,
           power: 0,
           dirX: 0,
-          dirY: -1,
+          dirY: isHost ? -1 : 1,
           pullX: 0,
           pullY: 0,
           pullDist: 0,
@@ -3657,10 +3751,103 @@ export default function App() {
         ctx.restore();
       }
 
+      // OPPONENT AIM TRAJECTORY WITH EXACTLY 4 WHITE DOTS (Real-time live multiplayer)
+      if (opponentDragForce.active && opponentDragForce.power > 0.02 && currentTurnRef.current === 'bot' && !isStrikerMoving) {
+        ctx.save();
 
+        const oppStriker = strikerRef.current;
+        const minCircleRadius = STRIKER_RADIUS + 8;
+        const maxCircleRadius = 138;
+        const currentCircleRadius = minCircleRadius + opponentDragForce.power * (maxCircleRadius - minCircleRadius);
 
+        const circleGrad = ctx.createRadialGradient(
+          oppStriker.x,
+          oppStriker.y,
+          STRIKER_RADIUS,
+          oppStriker.x,
+          oppStriker.y,
+          currentCircleRadius
+        );
+        circleGrad.addColorStop(0, 'rgba(0, 0, 0, 0.45)');
+        circleGrad.addColorStop(0.82, 'rgba(0, 0, 0, 0.32)');
+        circleGrad.addColorStop(1, 'rgba(0, 0, 0, 0.12)');
 
-      // Particles
+        ctx.beginPath();
+        ctx.arc(oppStriker.x, oppStriker.y, currentCircleRadius, 0, Math.PI * 2);
+        ctx.fillStyle = circleGrad;
+        ctx.fill();
+
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.stroke();
+
+        // Backward pull indicator line
+        const oppPullTargetX = oppStriker.x + (opponentDragForce.pullX || 0);
+        const oppPullTargetY = oppStriker.y + (opponentDragForce.pullY || 0);
+
+        ctx.beginPath();
+        ctx.setLineDash([6, 5]);
+        ctx.moveTo(oppStriker.x, oppStriker.y);
+        ctx.lineTo(oppPullTargetX, oppPullTargetY);
+        ctx.strokeStyle = 'rgba(20, 20, 20, 0.7)';
+        ctx.lineWidth = 2.2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Power Arrow
+        const arrowLength = 34 + opponentDragForce.power * 68;
+        const arrowStartX = oppStriker.x + opponentDragForce.dirX * (STRIKER_RADIUS + 2);
+        const arrowStartY = oppStriker.y + opponentDragForce.dirY * (STRIKER_RADIUS + 2);
+        const arrowEndX = oppStriker.x + opponentDragForce.dirX * (STRIKER_RADIUS + arrowLength);
+        const arrowEndY = oppStriker.y + opponentDragForce.dirY * (STRIKER_RADIUS + arrowLength);
+
+        const arrowGrad = ctx.createLinearGradient(arrowStartX, arrowStartY, arrowEndX, arrowEndY);
+        arrowGrad.addColorStop(0, '#E52E2E');
+        arrowGrad.addColorStop(0.5, '#FF6A00');
+        arrowGrad.addColorStop(1, '#FFE600');
+
+        ctx.beginPath();
+        ctx.moveTo(arrowStartX, arrowStartY);
+        ctx.lineTo(arrowEndX, arrowEndY);
+        ctx.strokeStyle = arrowGrad;
+        ctx.lineWidth = 4.2;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        const oppShotAngle = Math.atan2(opponentDragForce.dirY, opponentDragForce.dirX);
+        const headSize = 13;
+        ctx.beginPath();
+        ctx.moveTo(arrowEndX, arrowEndY);
+        ctx.lineTo(
+          arrowEndX - Math.cos(oppShotAngle - 0.45) * headSize,
+          arrowEndY - Math.sin(oppShotAngle - 0.45) * headSize
+        );
+        ctx.lineTo(
+          arrowEndX - Math.cos(oppShotAngle + 0.45) * headSize,
+          arrowEndY - Math.sin(oppShotAngle + 0.45) * headSize
+        );
+        ctx.closePath();
+        ctx.fillStyle = '#FFE600';
+        ctx.fill();
+
+        // EXACTLY 4 WHITE DOTS IN OPPONENT AIM TRAJECTORY LINE
+        const dotStartDist = STRIKER_RADIUS + arrowLength + 14;
+        const dotSpacing = 22;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = 5;
+        ctx.fillStyle = '#FFFFFF';
+
+        for (let i = 0; i < 4; i++) {
+          const dist = dotStartDist + i * dotSpacing;
+          const dotX = oppStriker.x + opponentDragForce.dirX * dist;
+          const dotY = oppStriker.y + opponentDragForce.dirY * dist;
+          ctx.beginPath();
+          ctx.arc(dotX, dotY, 3.8, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.restore();
+      }
       const particles = particlesRef.current;
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
@@ -3716,7 +3903,7 @@ export default function App() {
       isRunning = false;
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [runPhysicsStep, checkTurnSettlement, isDraggingStriker, dragForce]);
+  }, [runPhysicsStep, checkTurnSettlement, isDraggingStriker, dragForce, opponentDragForce, isStrikerMoving]);
 
   /* ==========================================================================
      WALLET DEPOSIT & WITHDRAW HANDLERS

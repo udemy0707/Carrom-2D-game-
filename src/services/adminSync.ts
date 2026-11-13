@@ -106,11 +106,13 @@ export interface AuthoritativeShot {
   shooterName: string;
   shooterRole: 'host' | 'guest';
   strikerX: number;
+  strikerY?: number;
   vx: number;
   vy: number;
   power: number;
   timestamp: number;
   sequenceNumber: number;
+  coins?: AuthoritativeCoin[];
 }
 
 export interface AuthoritativeLiveAiming {
@@ -635,13 +637,26 @@ export async function saveAdminSecurity(security: Partial<AdminSecurityConfig>):
    REAL-TIME MULTIPLAYER ROOM MATCHMAKING (FIRESTORE + HYBRID LOCAL FALLBACK)
    ========================================================================== */
 
+const persistentChannels = new Map<string, BroadcastChannel>();
+
+function getBroadcastChannel(roomId: string): BroadcastChannel | null {
+  if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return null;
+  if (!persistentChannels.has(roomId)) {
+    try {
+      persistentChannels.set(roomId, new BroadcastChannel(`carrom_room_${roomId}`));
+    } catch {
+      return null;
+    }
+  }
+  return persistentChannels.get(roomId) || null;
+}
+
 function saveLocalRoom(room: ServerGameRoom) {
   try {
     localStorage.setItem(`carrom_room_${room.roomId}`, JSON.stringify(room));
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      const channel = new BroadcastChannel(`carrom_room_${room.roomId}`);
-      channel.postMessage(room);
-      channel.close();
+    const ch = getBroadcastChannel(room.roomId);
+    if (ch) {
+      ch.postMessage(room);
     }
   } catch {}
   if (typeof window !== 'undefined') {
@@ -951,18 +966,13 @@ export async function respondMultiplayerRematch(roomId: string, status: 'APPROVE
 }
 
 export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom) => void): () => void {
-  let channel: BroadcastChannel | null = null;
+  const channel = getBroadcastChannel(roomId);
   const handleMessage = (e: MessageEvent) => {
     if (e.data) callback(e.data);
   };
 
-  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-    try {
-      channel = new BroadcastChannel(`carrom_room_${roomId}`);
-      channel.addEventListener('message', handleMessage);
-    } catch {
-      channel = null;
-    }
+  if (channel) {
+    channel.addEventListener('message', handleMessage);
   }
 
   const handleCustomEvent = (e: Event) => {
@@ -1001,7 +1011,6 @@ export function subscribeToRoom(roomId: string, callback: (room: ServerGameRoom)
   return () => {
     if (channel) {
       channel.removeEventListener('message', handleMessage);
-      channel.close();
     }
     if (typeof window !== 'undefined') {
       window.removeEventListener(`carrom_room_${roomId}`, handleCustomEvent);
@@ -1046,8 +1055,23 @@ export async function updateRoomGameState(
 let lastFirestoreStreamTime = 0;
 
 export function broadcastLiveStreamState(roomId: string, patchState: Partial<AuthoritativeGameState>): void {
-  const currentLocal = getLocalRoom(roomId);
-  if (!currentLocal) return;
+  const currentLocal = getLocalRoom(roomId) || {
+    roomId,
+    roomCode: roomId,
+    hostId: '',
+    hostName: 'Host Player',
+    entryFee: 0,
+    totalPot: 0,
+    winnerPrize: 0,
+    platformRake: 0,
+    status: 'active',
+    playerCount: 2,
+    turn: 'host',
+    gameState: '{}',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    expiresAt: Date.now() + 30 * 60 * 1000,
+  };
 
   let existingGameState: AuthoritativeGameState;
   try {
@@ -1059,16 +1083,18 @@ export function broadcastLiveStreamState(roomId: string, patchState: Partial<Aut
   }
 
   const updatedGameState = { ...existingGameState, ...patchState };
-  const updatedPayload: Partial<ServerGameRoom> = {
+  const updatedPayload: ServerGameRoom = {
     ...currentLocal,
     gameState: JSON.stringify(updatedGameState),
     updatedAt: new Date().toISOString(),
   };
 
-  saveLocalRoom(updatedPayload as ServerGameRoom);
+  saveLocalRoom(updatedPayload);
 
+  // If drag was released (isDragging === false), flush immediately so opponent never sees ghost drag
+  const isRelease = patchState.liveAiming && !patchState.liveAiming.isDragging;
   const now = Date.now();
-  if (now - lastFirestoreStreamTime > 100) {
+  if (isRelease || now - lastFirestoreStreamTime > 100) {
     lastFirestoreStreamTime = now;
     try {
       const docRef = doc(db, 'game_rooms', roomId);
