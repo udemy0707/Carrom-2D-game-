@@ -1104,7 +1104,7 @@ export function broadcastLiveStreamState(
   );
   
   const now = Date.now();
-  if (isRelease || now - lastFirestoreStreamTime > 60) {
+  if (isRelease || now - lastFirestoreStreamTime > 40) {
     lastFirestoreStreamTime = now;
     try {
       const docRef = doc(db, 'game_rooms', roomId);

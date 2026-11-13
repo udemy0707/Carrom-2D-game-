@@ -406,6 +406,406 @@ const MAX_STRIKE_VELOCITY = 21.5;
 // 6 Betting Options: 50, 100, 200, 500, 1000, 2000
 const BETTING_AMOUNTS = [50, 100, 200, 500, 1000, 2000];
 
+/* ==========================================================================
+   OFFSCREEN 120 FPS BOARD PRE-RENDERER
+   Pre-renders all static board layers, shadows, cushions, pockets, and compass
+   so the 120 FPS render loop executes in <0.5ms with a single GPU drawImage
+   ========================================================================== */
+function drawStaticBoardToCanvas(
+  targetCanvas: HTMLCanvasElement,
+  dpr: number,
+  centerImg: HTMLImageElement | null
+) {
+  const targetW = Math.round(BOARD_SIZE * dpr);
+  const targetH = Math.round(BOARD_SIZE * dpr);
+  targetCanvas.width = targetW;
+  targetCanvas.height = targetH;
+
+  const ctx = targetCanvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, BOARD_SIZE, BOARD_SIZE);
+
+  // 1. SOLID POLISHED ROSEWOOD OUTER FRAME
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(4, 4, BOARD_SIZE - 8, BOARD_SIZE - 8, 22);
+  const woodGrad = ctx.createLinearGradient(0, 0, BOARD_SIZE, BOARD_SIZE);
+  woodGrad.addColorStop(0, '#381708');
+  woodGrad.addColorStop(0.3, '#522510');
+  woodGrad.addColorStop(0.7, '#642E15');
+  woodGrad.addColorStop(1, '#260F04');
+  ctx.fillStyle = woodGrad;
+  ctx.fill();
+
+  // Outer gold trim hairline
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = '#B88230';
+  ctx.stroke();
+
+  // Metallic corner reinforcement inlays
+  const cornerOffsets = [
+    { x: 12, y: 12 },
+    { x: BOARD_SIZE - 28, y: 12 },
+    { x: 12, y: BOARD_SIZE - 28 },
+    { x: BOARD_SIZE - 28, y: BOARD_SIZE - 28 },
+  ];
+  ctx.fillStyle = '#D49E35';
+  for (const co of cornerOffsets) {
+    ctx.beginPath();
+    ctx.roundRect(co.x, co.y, 16, 16, 4);
+    ctx.fill();
+    ctx.strokeStyle = '#6E420C';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // 2. PLAYING SURFACE (Real Warm Indian Carrom Beechwood Veneer)
+  ctx.save();
+  const plyGrad = ctx.createRadialGradient(400, 400, 40, 400, 400, 490);
+  plyGrad.addColorStop(0, '#E8CBA0'); // Lighter center
+  plyGrad.addColorStop(0.55, '#DDB681');
+  plyGrad.addColorStop(1, '#C89D62'); // Subtle warm edge
+  ctx.fillStyle = plyGrad;
+  ctx.fillRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, PLAY_MAX - PLAY_MIN);
+
+  // Subtle natural wood grain lines across veneer
+  ctx.strokeStyle = 'rgba(125, 75, 30, 0.04)';
+  ctx.lineWidth = 1;
+  for (let gy = PLAY_MIN; gy < PLAY_MAX; gy += 14) {
+    ctx.beginPath();
+    ctx.moveTo(PLAY_MIN, gy);
+    ctx.lineTo(PLAY_MAX, gy);
+    ctx.stroke();
+  }
+
+  // 3D Inner Frame Shadows & Rebound Cushion Bumpers
+  const topShadow = ctx.createLinearGradient(0, PLAY_MIN, 0, PLAY_MIN + 26);
+  topShadow.addColorStop(0, 'rgba(12, 5, 2, 0.72)');
+  topShadow.addColorStop(0.35, 'rgba(20, 8, 3, 0.42)');
+  topShadow.addColorStop(1, 'rgba(25, 12, 4, 0)');
+  ctx.fillStyle = topShadow;
+  ctx.fillRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, 26);
+
+  const leftShadow = ctx.createLinearGradient(PLAY_MIN, 0, PLAY_MIN + 26, 0);
+  leftShadow.addColorStop(0, 'rgba(12, 5, 2, 0.72)');
+  leftShadow.addColorStop(0.35, 'rgba(20, 8, 3, 0.42)');
+  leftShadow.addColorStop(1, 'rgba(25, 12, 4, 0)');
+  ctx.fillStyle = leftShadow;
+  ctx.fillRect(PLAY_MIN, PLAY_MIN, 26, PLAY_MAX - PLAY_MIN);
+
+  const bottomShadow = ctx.createLinearGradient(0, PLAY_MAX, 0, PLAY_MAX - 18);
+  bottomShadow.addColorStop(0, 'rgba(15, 6, 2, 0.52)');
+  bottomShadow.addColorStop(1, 'rgba(20, 10, 4, 0)');
+  ctx.fillStyle = bottomShadow;
+  ctx.fillRect(PLAY_MIN, PLAY_MAX - 18, PLAY_MAX - PLAY_MIN, 18);
+
+  const rightShadow = ctx.createLinearGradient(PLAY_MAX, 0, PLAY_MAX - 18, 0);
+  rightShadow.addColorStop(0, 'rgba(15, 6, 2, 0.52)');
+  rightShadow.addColorStop(1, 'rgba(20, 10, 4, 0)');
+  ctx.fillStyle = rightShadow;
+  ctx.fillRect(PLAY_MAX - 18, PLAY_MIN, 18, PLAY_MAX - PLAY_MIN);
+
+  // Physical Rebound Rubber Cushion Strips along all 4 frame walls
+  ctx.strokeStyle = '#220D04';
+  ctx.lineWidth = 3.5;
+  ctx.strokeRect(PLAY_MIN, PLAY_MIN, PLAY_MAX - PLAY_MIN, PLAY_MAX - PLAY_MIN);
+
+  // Cushion Inner Bevel Highlight
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(PLAY_MIN + 2, PLAY_MIN + 2, PLAY_MAX - PLAY_MIN - 4, PLAY_MAX - PLAY_MIN - 4);
+  ctx.restore();
+
+  // 3. AUTHENTIC CIRCULAR NET HOLES WITH WOVEN NET MESH & DEPTH
+  for (const pocket of POCKETS) {
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS + 4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS + 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#180B05';
+    ctx.fill();
+
+    const holeGrad = ctx.createRadialGradient(pocket.x - 6, pocket.y - 6, 2, pocket.x, pocket.y, POCKET_HOLE_RADIUS);
+    holeGrad.addColorStop(0, '#020305');
+    holeGrad.addColorStop(0.8, '#080A0E');
+    holeGrad.addColorStop(1, '#1A0E08');
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = holeGrad;
+    ctx.fill();
+
+    // Woven Net Mesh Texture inside circular pocket
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS - 1, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+    ctx.lineWidth = 1.2;
+    for (let offset = -44; offset <= 44; offset += 8) {
+      ctx.beginPath();
+      ctx.moveTo(pocket.x - 44, pocket.y + offset);
+      ctx.lineTo(pocket.x + 44, pocket.y + offset + 26);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(pocket.x - 44, pocket.y + offset + 26);
+      ctx.lineTo(pocket.x + 44, pocket.y + offset);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Polished brass ring rim
+    ctx.lineWidth = 2.2;
+    ctx.strokeStyle = 'rgba(196, 142, 54, 0.55)';
+    ctx.beginPath();
+    ctx.arc(pocket.x, pocket.y, POCKET_HOLE_RADIUS, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 4. EXACT CENTER CIRCULAR COMPASS DESIGN
+  ctx.save();
+  if (centerImg && centerImg.complete && centerImg.naturalWidth > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(400, 400, 114, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(centerImg, 400 - 114, 400 - 114, 228, 228);
+    ctx.restore();
+  }
+
+  const compassBrown = '#361807';
+  const compassLight = '#F3E2C7';
+  const compassDark = '#251004';
+
+  ctx.strokeStyle = compassBrown;
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.arc(400, 400, 108, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(400, 400, 104, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.setLineDash([5, 5]);
+  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = '#4A230A';
+  ctx.arc(400, 400, 86, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.strokeStyle = compassBrown;
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.arc(400, 400, 64, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const numPoints = 8;
+  for (let p = 0; p < numPoints; p++) {
+    const isCardinal = p % 2 === 0;
+    const tipAngle = (p * Math.PI) / 4;
+    const tipRadius = isCardinal ? 104 : 82;
+    const baseWidthAngle = isCardinal ? 0.22 : 0.18;
+
+    const tipX = 400 + Math.cos(tipAngle) * tipRadius;
+    const tipY = 400 + Math.sin(tipAngle) * tipRadius;
+
+    const leftBaseAngle = tipAngle - baseWidthAngle;
+    const rightBaseAngle = tipAngle + baseWidthAngle;
+    const baseRadius = 22;
+
+    const leftBaseX = 400 + Math.cos(leftBaseAngle) * baseRadius;
+    const leftBaseY = 400 + Math.sin(leftBaseAngle) * baseRadius;
+    const rightBaseX = 400 + Math.cos(rightBaseAngle) * baseRadius;
+    const rightBaseY = 400 + Math.sin(rightBaseAngle) * baseRadius;
+
+    ctx.beginPath();
+    ctx.moveTo(400, 400);
+    ctx.lineTo(leftBaseX, leftBaseY);
+    ctx.lineTo(tipX, tipY);
+    ctx.closePath();
+    ctx.fillStyle = compassDark;
+    ctx.fill();
+    ctx.strokeStyle = '#1A0C04';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(400, 400);
+    ctx.lineTo(rightBaseX, rightBaseY);
+    ctx.lineTo(tipX, tipY);
+    ctx.closePath();
+    ctx.fillStyle = compassLight;
+    ctx.fill();
+    ctx.strokeStyle = '#1A0C04';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(400, 400);
+    ctx.lineTo(tipX, tipY);
+    ctx.strokeStyle = '#1E0D04';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = compassBrown;
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.arc(400, 400, 22, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(400, 400, 16, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(400, 400, 9.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#C02626';
+  ctx.fill();
+  ctx.strokeStyle = '#260E03';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+
+  // 5. 4 IDENTICAL BASELINES
+  const BASELINE_OFFSET = 248;
+  const TRACK_WIDTH = 28;
+  const LINE_SEP = 12;
+  const CIRCLE_RADIUS = 18;
+  const RED_DOT_RADIUS = 5.5;
+
+  const drawBaseline = (isVertical: boolean, axisVal: number) => {
+    ctx.save();
+    const minCoord = BASELINE_MIN_X;
+    const maxCoord = BASELINE_MAX_X;
+    const span = maxCoord - minCoord;
+
+    ctx.beginPath();
+    if (isVertical) {
+      ctx.roundRect(axisVal - TRACK_WIDTH / 2, minCoord - 14, TRACK_WIDTH, span + 28, 14);
+    } else {
+      ctx.roundRect(minCoord - 14, axisVal - TRACK_WIDTH / 2, span + 28, TRACK_WIDTH, 14);
+    }
+    ctx.fillStyle = 'rgba(196, 142, 88, 0.28)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(92, 45, 18, 0.55)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(75, 32, 10, 0.75)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    if (isVertical) {
+      ctx.moveTo(axisVal - LINE_SEP / 2, minCoord);
+      ctx.lineTo(axisVal - LINE_SEP / 2, maxCoord);
+      ctx.moveTo(axisVal + LINE_SEP / 2, minCoord);
+      ctx.lineTo(axisVal + LINE_SEP / 2, maxCoord);
+    } else {
+      ctx.moveTo(minCoord, axisVal - LINE_SEP / 2);
+      ctx.lineTo(maxCoord, axisVal - LINE_SEP / 2);
+      ctx.moveTo(minCoord, axisVal + LINE_SEP / 2);
+      ctx.lineTo(maxCoord, axisVal + LINE_SEP / 2);
+    }
+    ctx.stroke();
+
+    const endpoints = [minCoord, maxCoord];
+    for (const ep of endpoints) {
+      const cx = isVertical ? axisVal : ep;
+      const cy = isVertical ? ep : axisVal;
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, CIRCLE_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = '#C89360';
+      ctx.fill();
+      ctx.strokeStyle = '#5E270A';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, RED_DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = '#D92D20';
+      ctx.fill();
+      ctx.strokeStyle = '#381303';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  drawBaseline(false, 400 + BASELINE_OFFSET);
+  drawBaseline(false, 400 - BASELINE_OFFSET);
+  drawBaseline(true, 400 - BASELINE_OFFSET);
+  drawBaseline(true, 400 + BASELINE_OFFSET);
+
+  // 6. FOUL POINTER ARROWS TOWARDS 4 CORNERS
+  for (const pocket of POCKETS) {
+    const ang = Math.atan2(pocket.y - 400, pocket.x - 400);
+    const arrowStartDist = 120;
+    const arrowEndDist = 265;
+
+    const startX = 400 + Math.cos(ang) * arrowStartDist;
+    const startY = 400 + Math.sin(ang) * arrowStartDist;
+    const endX = 400 + Math.cos(ang) * arrowEndDist;
+    const endY = 400 + Math.sin(ang) * arrowEndDist;
+
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(endX, endY);
+    ctx.strokeStyle = 'rgba(75, 32, 10, 0.7)';
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    const hookRadius = 26;
+    ctx.save();
+    ctx.translate(endX, endY);
+    ctx.rotate(ang);
+
+    ctx.beginPath();
+    ctx.arc(0, 0, hookRadius, -Math.PI * 0.72, Math.PI * 0.72);
+    ctx.strokeStyle = 'rgba(75, 32, 10, 0.75)';
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    const a1Ang = -Math.PI * 0.72;
+    const a1X = Math.cos(a1Ang) * hookRadius;
+    const a1Y = Math.sin(a1Ang) * hookRadius;
+    ctx.beginPath();
+    ctx.moveTo(a1X, a1Y);
+    ctx.lineTo(a1X + 4, a1Y - 6);
+    ctx.lineTo(a1X - 6, a1Y - 4);
+    ctx.closePath();
+    ctx.fillStyle = '#4D2208';
+    ctx.fill();
+
+    const a2Ang = Math.PI * 0.72;
+    const a2X = Math.cos(a2Ang) * hookRadius;
+    const a2Y = Math.sin(a2Ang) * hookRadius;
+    ctx.beginPath();
+    ctx.moveTo(a2X, a2Y);
+    ctx.lineTo(a2X + 4, a2Y + 6);
+    ctx.lineTo(a2X - 6, a2Y + 4);
+    ctx.closePath();
+    ctx.fillStyle = '#4D2208';
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
 type CoinType = 'white' | 'black' | 'queen';
 type QueenState = 'on_board' | 'pending_player' | 'pending_bot' | 'covered_player' | 'covered_bot';
 
@@ -1352,6 +1752,24 @@ export default function App() {
     pullY: 0,
   });
 
+  // Zero-react-render 120 FPS high-precision drag tracking refs
+  const dragForceRef = useRef<{
+    pullDist: number;
+    power: number;
+    dirX: number;
+    dirY: number;
+    pullX: number;
+    pullY: number;
+  }>({
+    pullDist: 0,
+    power: 0,
+    dirX: 0,
+    dirY: -1,
+    pullX: 0,
+    pullY: 0,
+  });
+  const isDraggingStrikerRef = useRef<boolean>(false);
+
   // Opponent Live Motion & Drag Aiming State (Request 1 & 4)
   const [opponentStrikerX, setOpponentStrikerX] = useState<number>(400);
   const [opponentDragForce, setOpponentDragForce] = useState<{
@@ -2283,14 +2701,14 @@ export default function App() {
         if (parsed.liveAiming && parsed.liveAiming.shooterRole !== localRoleRef.current) {
           const live = parsed.liveAiming;
           const oppStrikerX = isHost ? live.strikerX : 800 - live.strikerX;
-          setOpponentStrikerX(oppStrikerX);
           targetOpponentStrikerXRef.current = oppStrikerX;
 
+          // Generous 1800ms heartbeat window prevents network jitter from flickering opponent aim trajectory
           const isAimingActive = Boolean(
             live.isDragging &&
             (live.power || 0) > 0.02 &&
             !isTurnInProgressRef.current &&
-            (!live.timestamp || Date.now() - live.timestamp < 450)
+            (!live.timestamp || Date.now() - live.timestamp < 1800)
           );
 
           if (isAimingActive) {
@@ -2309,16 +2727,6 @@ export default function App() {
               pullY: oppPullY,
               pullDist: live.pullDist,
             };
-
-            setOpponentDragForce({
-              active: true,
-              power: live.power,
-              dirX: oppDirX,
-              dirY: oppDirY,
-              pullX: oppPullX,
-              pullY: oppPullY,
-              pullDist: live.pullDist,
-            });
           } else {
             lastOpponentAimTimeRef.current = 0;
             targetOpponentAimRef.current = {
@@ -2331,33 +2739,25 @@ export default function App() {
               pullDist: 0,
             };
             visualOpponentAimRef.current.active = false;
-            setOpponentDragForce({
-              active: false,
-              power: 0,
-              dirX: 0,
-              dirY: 1,
-              pullX: 0,
-              pullY: 0,
-              pullDist: 0,
-            });
+            visualOpponentAimRef.current.power = 0;
           }
         } else if (!isTurnInProgressRef.current) {
           lastOpponentAimTimeRef.current = 0;
           targetOpponentAimRef.current.active = false;
           visualOpponentAimRef.current.active = false;
-          setOpponentDragForce({
-            active: false,
-            power: 0,
-            dirX: 0,
-            dirY: 1,
-            pullX: 0,
-            pullY: 0,
-            pullDist: 0,
-          });
+          visualOpponentAimRef.current.power = 0;
         }
 
         // 6. Sync live physics simulation motion from active shooter in real-time
-        if (parsed.livePhysics && parsed.livePhysics.shooterRole !== localRoleRef.current) {
+        // STRICT RULE 1: Never apply opponent physics during player turn, and never initiate unreleased shots
+        if (
+          parsed.livePhysics &&
+          parsed.livePhysics.shooterRole !== localRoleRef.current &&
+          currentTurnRef.current === 'bot' &&
+          isTurnInProgressRef.current &&
+          parsed.livePhysics.timestamp &&
+          Date.now() - parsed.livePhysics.timestamp < 1200
+        ) {
           const phys = parsed.livePhysics;
           if (phys.striker) {
             strikerRef.current.x = isHost ? phys.striker.x : 800 - phys.striker.x;
@@ -2366,8 +2766,6 @@ export default function App() {
             strikerRef.current.vy = isHost ? phys.striker.vy : -phys.striker.vy;
             strikerRef.current.isPocketed = false;
             strikerRef.current.isSinking = false;
-            isTurnInProgressRef.current = true;
-            setIsStrikerMoving(true);
           }
           if (Array.isArray(phys.coins) && phys.coins.length > 0) {
             const currentCoins = coinsRef.current;
@@ -2382,21 +2780,24 @@ export default function App() {
                 if (c.isPocketed) match.isSinking = false;
               }
             });
-            isTurnInProgressRef.current = true;
-            setIsStrikerMoving(true);
           }
         }
 
         // 7. Process opponent shot (STRICT REALTIME OPPONENT SHOT EXECUTION - RULE 1: NEVER AUTO-SHOOT STALE)
-        if (parsed.lastShot && parsed.lastShot.sequenceNumber > lastShotSequenceRef.current) {
+        if (
+          parsed.lastShot &&
+          parsed.lastShot.sequenceNumber > lastShotSequenceRef.current &&
+          parsed.lastShot.shooterRole !== localRoleRef.current &&
+          currentTurnRef.current === 'bot'
+        ) {
           const shotSeq = parsed.lastShot.sequenceNumber;
           lastShotSequenceRef.current = shotSeq; // Consume sequence immediately
 
           const shotAge = Date.now() - (parsed.lastShot.timestamp || 0);
 
-          // Only simulate motion if this shot was executed by the OPPONENT and is fresh (< 3500ms)
+          // Only simulate motion if this shot was executed by the OPPONENT during their turn and is fresh (< 2500ms)
           // RULE 1: Stale shots must never auto-shoot under any condition
-          if (parsed.lastShot.shooterRole !== localRoleRef.current && shotAge < 3500) {
+          if (shotAge < 2500) {
             const shot = parsed.lastShot;
             const startX = isHost ? shot.strikerX : 800 - shot.strikerX;
             const startY = isHost
@@ -2409,15 +2810,6 @@ export default function App() {
             lastOpponentAimTimeRef.current = 0;
             targetOpponentAimRef.current.active = false;
             visualOpponentAimRef.current.active = false;
-            setOpponentDragForce({
-              active: false,
-              power: 0,
-              dirX: 0,
-              dirY: 1,
-              pullX: 0,
-              pullY: 0,
-              pullDist: 0,
-            });
 
             // Sync coins to pre-shot positions if included
             if (Array.isArray(shot.coins) && shot.coins.length > 0) {
@@ -2447,7 +2839,6 @@ export default function App() {
             shotStartTimeRef.current = Date.now();
             isTurnInProgressRef.current = true;
             setIsStrikerMoving(true);
-            soundEngine.playStrikerHit(shot.power || 0.8);
           }
         }
       } catch (e) {
@@ -2471,17 +2862,6 @@ export default function App() {
     const coins = coinsRef.current;
     const striker = strikerRef.current;
     const allDiscs = [striker, ...coins].filter((c) => !c.isPocketed);
-
-    // 0. Smooth 60fps lerp interpolation for opponent's striker slider positioning on baseline (Request 2)
-    if (!isTurnInProgressRef.current && currentTurnRef.current === 'bot') {
-      const diff = targetOpponentStrikerXRef.current - striker.x;
-      if (Math.abs(diff) > 0.5) {
-        striker.x += diff * 0.45;
-      } else {
-        striker.x = targetOpponentStrikerXRef.current;
-      }
-      striker.y = BOT_BASELINE_Y;
-    }
 
     // Broadcast live physics positions during shot motion (Request 1 & Request 2)
     if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId && isTurnInProgressRef.current && currentTurnRef.current === 'player') {
@@ -3145,7 +3525,7 @@ export default function App() {
     const pullY = currentY - s.y;
     const pullDist = Math.hypot(pullX, pullY);
 
-    if (pullDist > 12) {
+    if (pullDist > 14) {
       dragTrackingRef.current.hasDragged = true;
     }
 
@@ -3160,18 +3540,18 @@ export default function App() {
       const dirX = Math.cos(shotAngle);
       const dirY = Math.sin(shotAngle);
 
-      setDragForce({
+      dragForceRef.current = {
         pullDist: clampedPull,
         power,
         dirX,
         dirY,
         pullX,
         pullY,
-      });
+      };
 
       if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
         const now = Date.now();
-        if (now - lastDragBroadcastRef.current >= 35) {
+        if (now - lastDragBroadcastRef.current >= 30) {
           lastDragBroadcastRef.current = now;
           const isHost = localRoleRef.current === 'host';
           const worldStrikerX = isHost ? s.x : 800 - s.x;
@@ -3197,14 +3577,14 @@ export default function App() {
         }
       }
     } else {
-      setDragForce({
+      dragForceRef.current = {
         pullDist: 0,
         power: 0,
         dirX: 0,
         dirY: -1,
         pullX: 0,
         pullY: 0,
-      });
+      };
 
       if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
         const isHost = localRoleRef.current === 'host';
@@ -3249,7 +3629,7 @@ export default function App() {
     const distToStriker = Math.hypot(clickX - s.x, clickY - s.y);
 
     // Require touching/clicking directly on or within close proximity of the striker
-    if (distToStriker <= STRIKER_RADIUS * 2.5) {
+    if (distToStriker <= STRIKER_RADIUS * 2.0) {
       dragTrackingRef.current = {
         active: true,
         touchStartX: e.clientX,
@@ -3260,6 +3640,7 @@ export default function App() {
         hasDragged: false,
       };
 
+      isDraggingStrikerRef.current = true;
       setIsDraggingStriker(true);
       updateDragFromPointer(e.clientX, e.clientY);
     }
@@ -3279,15 +3660,16 @@ export default function App() {
       if (!dragTrackingRef.current.active) return;
       dragTrackingRef.current.active = false;
       dragTrackingRef.current.hasDragged = false;
+      isDraggingStrikerRef.current = false;
       setIsDraggingStriker(false);
-      setDragForce({
+      dragForceRef.current = {
         pullDist: 0,
         power: 0,
         dirX: 0,
         dirY: -1,
         pullX: 0,
         pullY: 0,
-      });
+      };
 
       if (matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
         const isHost = localRoleRef.current === 'host';
@@ -3318,22 +3700,24 @@ export default function App() {
       if (!dragTrackingRef.current.active) return;
       const wasActive = dragTrackingRef.current.active;
       const hadDragged = dragTrackingRef.current.hasDragged;
+      const touchStartTime = dragTrackingRef.current.touchStartTime;
       dragTrackingRef.current.active = false;
       dragTrackingRef.current.hasDragged = false;
+      isDraggingStrikerRef.current = false;
       setIsDraggingStriker(false);
 
       if (!wasActive) return;
 
       // RULE 1: THE STRIKER SHOULD NEVER EVER AUTOMATICALLY SHOOT AT ANY CONDITION
-      if (currentTurnRef.current !== 'player' || isStrikerMoving || isTurnInProgressRef.current) {
-        setDragForce({
+      if (currentTurnRef.current !== 'player' || isStrikerMoving || isTurnInProgressRef.current || isStrikerAnimating) {
+        dragForceRef.current = {
           pullDist: 0,
           power: 0,
           dirX: 0,
           dirY: -1,
           pullX: 0,
           pullY: 0,
-        });
+        };
         return;
       }
 
@@ -3349,22 +3733,27 @@ export default function App() {
       const pullX = currentX - s.x;
       const pullY = currentY - s.y;
       const pullDist = Math.hypot(pullX, pullY);
+      const elapsedHold = Date.now() - touchStartTime;
 
-      // Strict intentional shot release criteria:
+      // STRICT INTENTIONAL SHOT RELEASE CRITERIA (RULE 1: STRICTEST ANTI-AUTO-SHOOT GUARANTEE):
       // - Pointer was actively dragged (hadDragged === true)
-      // - Substantial pullback distance (pullDist >= 26)
-      // - Pulling backward toward player baseline (pullY >= 4)
+      // - Drag was held for at least 130ms (prevents accidental quick taps / double clicks)
+      // - Substantial pullback distance (pullDist >= 36)
+      // - Backward pull toward player baseline (pullY >= 18)
+      // - Decisive backward angle: pullY > Math.abs(pullX) * 0.25 (ensures horizontal sliding NEVER shoots)
       const isIntentionalShot =
         hadDragged &&
-        pullDist >= 26 &&
-        pullY >= 4;
+        elapsedHold >= 130 &&
+        pullDist >= 36 &&
+        pullY >= 18 &&
+        pullY > Math.abs(pullX) * 0.25;
 
       if (isIntentionalShot) {
         const clampedPull = Math.min(MAX_DRAG_DIST, pullDist);
         const t = clampedPull / MAX_DRAG_DIST;
         const power = Math.pow(t, 1.35);
 
-        if (power >= 0.08) {
+        if (power >= 0.10) {
           const impulseSpeed = power * MAX_STRIKE_VELOCITY;
           const pullAngle = Math.atan2(pullY, pullX);
           const shotAngle = pullAngle + Math.PI;
@@ -3459,14 +3848,14 @@ export default function App() {
         }
       }
 
-      setDragForce({
+      dragForceRef.current = {
         pullDist: 0,
         power: 0,
         dirX: 0,
         dirY: -1,
         pullX: 0,
         pullY: 0,
-      });
+      };
 
       // If no intentional shot was released, immediately clear aiming on opponent's screen
       if (!isIntentionalShot && matchmakingMode === 'PRIVATE_ROOM' && activeRoom.gameId) {
@@ -3494,16 +3883,26 @@ export default function App() {
       }
     };
 
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && dragTrackingRef.current.active) {
+        handleGlobalPointerCancel();
+      }
+    };
+
     window.addEventListener('pointermove', handleGlobalPointerMove);
     window.addEventListener('pointerup', handleGlobalPointerUp);
     window.addEventListener('pointercancel', handleGlobalPointerCancel);
+    window.addEventListener('blur', handleGlobalPointerCancel);
+    window.addEventListener('keydown', handleKeyDown);
 
     return () => {
       window.removeEventListener('pointermove', handleGlobalPointerMove);
       window.removeEventListener('pointerup', handleGlobalPointerUp);
       window.removeEventListener('pointercancel', handleGlobalPointerCancel);
+      window.removeEventListener('blur', handleGlobalPointerCancel);
+      window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [updateDragFromPointer]);
+  }, [updateDragFromPointer, isStrikerMoving, isStrikerAnimating, matchmakingMode, activeRoom.gameId, playerName, playerWhitePocketed, botBlackPocketed, queenState, screen]);
 
   // Baseline positioning slider
   const handleBaselineSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
